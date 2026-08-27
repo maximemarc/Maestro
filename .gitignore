@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.DS_Store
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Worktrees de travail créés par Claude Code : jamais versionnés
+.claude/worktrees/

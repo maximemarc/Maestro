@@ -1,0 +1,31 @@
+{
+  "name": "maestro",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Maestro — poste de commandement self-hosted pour orchestrer des agents Claude Code",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:server dev:web",
+    "dev:server": "npm run dev -w @maestro/server",
+    "dev:web": "npm run dev -w @maestro/web",
+    "build": "npm run build -w @maestro/web",
+    "start": "npm run start -w @maestro/server",
+    "typecheck": "npm run typecheck -w @maestro/shared && npm run typecheck -w @maestro/server && npm run typecheck -w @maestro/web",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "npm run test -w @maestro/shared --if-present && npm run test -w @maestro/server && npm run test -w @maestro/web",
+    "qa": "npm run typecheck && npm run lint && npm run format:check && npm run test"
+  },
+  "devDependencies": {
+    "npm-run-all2": "^7.0.2",
+    "typescript": "^5.7.3"
+  }
+}

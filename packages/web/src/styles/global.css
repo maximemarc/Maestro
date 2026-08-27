@@ -1,0 +1,2189 @@
+/* ==========================================================================
+   Maestro — design system « mission control » (thème sombre unique)
+
+   Un seul thème pour toute l'application : c'est une console d'exploitation
+   ouverte des heures, pas un site vitrine. Aucune vue ne s'inverse.
+
+   ---------------------------------------------------------------------------
+   COUCHES
+
+   L'ordre déclaré ci-dessous fixe la cascade, indépendamment de l'ordre
+   d'écriture dans le fichier. C'est la correction d'un défaut réel : `.btn`
+   déclarait `display` et arrivait après `.nav-toggle` ; à spécificité égale,
+   c'est le dernier qui gagnait, et le bouton de navigation mobile restait
+   visible en grand écran. Avec des couches, une utilitaire bat toujours un
+   composant, et on ne raisonne plus sur la position d'une règle dans le
+   fichier.
+
+   Les déclarations `!important` suivent l'ordre INVERSE des couches : le bloc
+   `prefers-reduced-motion` de la couche composants bat donc les utilitaires,
+   ce qui est exactement ce qu'on veut d'un réglage d'accessibilité.
+
+   Règle de contribution : les pages consomment ces classes. Un style inline
+   n'est légitime que pour une valeur qu'aucune feuille ne peut connaître —
+   couleur choisie par l'utilisateur pour un agent, position d'un nœud du
+   graphe. Tout le reste appartient à ce fichier.
+   ========================================================================== */
+
+@layer tokens, base, components, utilities;
+
+@layer tokens {
+  :root {
+    /* --- Surfaces ---------------------------------------------------------
+       Quatre plans, du fond vers l'avant. Une carte ne s'empile jamais sur une
+       carte : au-delà de --bg-hover il n'y a plus de plan, il y a une modale. */
+    --bg: #0a0e14;
+    --bg-panel: #10151f;
+    --bg-elevated: #161d2b;
+    --bg-hover: #1b2434;
+    --border: #1f2937;
+    --border-strong: #2b3648;
+
+    /* --- Texte -------------------------------------------------------------
+       Trois graduations, toutes au-dessus de WCAG AA (4,5:1) y compris sur le
+       plan le plus clair. L'ancienne valeur atténuée plafonnait à 2,6:1 alors
+       qu'elle portait horodatages, indices et intitulés de colonne : c'était du
+       contenu illisible, pas de la discrétion. */
+    --text: #e2e8f0;
+    --text-muted: #9aa7bd;
+    --text-faint: #7e8ca5;
+
+    /* --- Accent & statuts --------------------------------------------------
+       Un seul accent pour toute l'application. Les autres teintes sont
+       sémantiques — succès, attente, échec, délégation — jamais décoratives. */
+    --accent: #22d3ee;
+    --accent-dim: rgba(34, 211, 238, 0.12);
+    --accent-ink: #04212a;
+    --ok: #34d399;
+    --ok-dim: rgba(52, 211, 153, 0.12);
+    --ok-ink: #04241a;
+    --warn: #fbbf24;
+    --warn-dim: rgba(251, 191, 36, 0.12);
+    --danger: #fb8a8a;
+    --danger-dim: rgba(248, 113, 113, 0.14);
+    --violet: #a78bfa;
+    --violet-dim: rgba(167, 139, 250, 0.12);
+
+    /* --- Typographie -------------------------------------------------------
+       Geist et Geist Mono sont auto-hébergés (import dans main.tsx). L'ancienne
+       pile déclarait « Inter » sans jamais la charger : l'application rendait en
+       police système, donc différemment sur chaque poste. */
+    --font: 'Geist Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --mono: 'Geist Mono Variable', ui-monospace, 'Cascadia Code', Menlo, monospace;
+
+    /* Six graduations, aucun demi-pixel. */
+    --text-xs: 11px;
+    --text-sm: 12px;
+    --text-base: 13px;
+    --text-md: 15px;
+    --text-lg: 20px;
+    --text-xl: 28px;
+
+    /* Trois interlignes : dense (données), normal (interface), lisible (prose). */
+    --leading-tight: 1.25;
+    --leading: 1.5;
+    --leading-loose: 1.65;
+
+    /* --- Espacement : base 4, sept graduations ---------------------------- */
+    --space-1: 4px;
+    --space-2: 8px;
+    --space-3: 12px;
+    --space-4: 16px;
+    --space-5: 24px;
+    --space-6: 32px;
+    --space-8: 48px;
+
+    /* --- Formes ------------------------------------------------------------
+       Règle unique et explicite : conteneur 8px, contrôle 5px, pastille
+       pleinement arrondie. Aucune autre valeur ailleurs. */
+    --radius: 8px;
+    --radius-sm: 5px;
+    --radius-pill: 999px;
+
+    /* --- Ombres : teintées vers le fond, jamais en noir pur. -------------- */
+    --shadow-pop: 0 8px 24px rgba(4, 7, 12, 0.55);
+    --shadow-modal: 0 24px 60px rgba(4, 7, 12, 0.7);
+
+    /* --- Mouvement ---------------------------------------------------------
+       Deux durées, une courbe. Toute animation reste conditionnée à
+       prefers-reduced-motion (bas de fichier). */
+    --dur-fast: 100ms;
+    --dur: 160ms;
+    --ease: cubic-bezier(0.2, 0, 0.2, 1);
+
+    /* --- Plans d'empilement -----------------------------------------------
+       Échelle fermée. Un z-index arbitraire dans une page est un bug. */
+    --z-sticky: 10;
+    --z-drawer: 40;
+    --z-modal: 50;
+    --z-palette: 60;
+    --z-nav-mobile: 70;
+
+    /* --- Gabarit ----------------------------------------------------------- */
+    --sidebar-w: 216px;
+    --sidebar-rail-w: 56px;
+    --topbar-h: 52px;
+  }
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: var(--text-base);
+    line-height: var(--leading);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border-strong);
+    border-radius: var(--radius-pill);
+    border: 2px solid var(--bg);
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+
+  /* Focus clavier visible partout. :focus-visible ne se déclenche pas au clic
+     souris : l'anneau ne gêne personne, mais la navigation au clavier redevient
+     possible — elle ne l'était plus. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  h1,
+  h2,
+  h3 {
+    margin: 0 0 var(--space-2);
+    font-weight: 600;
+    line-height: var(--leading-tight);
+  }
+  h1 {
+    font-size: var(--text-lg);
+  }
+  h2 {
+    font-size: var(--text-md);
+  }
+  h3 {
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  code,
+  .mono {
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+  }
+
+  /* Lu par les lecteurs d'écran, invisible à l'écran. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* Touche clavier, pour les raccourcis affichés dans l'interface. */
+  kbd {
+    font-family: var(--mono);
+    font-size: var(--text-xs);
+    line-height: 1;
+    padding: 3px 5px;
+    border-radius: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+}
+
+@layer components {
+  /* --- Gabarit applicatif --------------------------------------------------
+     100dvh et non 100vh : sur mobile, la barre d'adresse iOS fait sauter 100vh
+     au premier défilement. */
+
+  .app-shell {
+    display: flex;
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  .sidebar {
+    width: var(--sidebar-w);
+    flex-shrink: 0;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: var(--space-4) var(--space-3);
+    gap: 2px;
+    transition:
+      width var(--dur) var(--ease),
+      transform var(--dur) var(--ease);
+  }
+
+  .sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2) var(--space-4);
+    font-size: var(--text-md);
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+  }
+  .sidebar-brand .brand-mark {
+    color: var(--accent);
+    flex-shrink: 0;
+    display: inline-flex;
+  }
+  /* État de la liaison temps réel. La couleur ne porte pas seule le message :
+     le libellé accessible dit la même chose. */
+  .sidebar-brand .link-state {
+    margin-left: auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex-shrink: 0;
+  }
+  .sidebar-brand .link-state.off {
+    background: var(--danger);
+  }
+
+  .nav-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-weight: 500;
+    white-space: nowrap;
+    position: relative;
+    transition:
+      background var(--dur-fast),
+      color var(--dur-fast);
+  }
+  .nav-link:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+    text-decoration: none;
+  }
+  .nav-link.active {
+    background: var(--accent-dim);
+    color: var(--accent);
+  }
+  .nav-link .nav-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+  }
+  .nav-link .count {
+    margin-left: auto;
+    font-size: var(--text-xs);
+    font-weight: 700;
+    background: var(--danger);
+    color: var(--bg);
+    border-radius: var(--radius-pill);
+    padding: 0 6px;
+    min-width: 18px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding-top: var(--space-3);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .sidebar-collapse {
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    cursor: pointer;
+    padding: var(--space-1);
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    font-family: var(--font);
+  }
+  .sidebar-collapse:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  /* --- Rail : navigation réduite aux icônes ------------------------------ */
+
+  .app-shell[data-rail='true'] .sidebar {
+    width: var(--sidebar-rail-w);
+    padding-left: var(--space-2);
+    padding-right: var(--space-2);
+    align-items: center;
+  }
+  .app-shell[data-rail='true'] .nav-label,
+  .app-shell[data-rail='true'] .brand-label,
+  .app-shell[data-rail='true'] .footer-text {
+    display: none;
+  }
+  .app-shell[data-rail='true'] .nav-link {
+    justify-content: center;
+    width: 40px;
+    padding: var(--space-2) 0;
+  }
+  .app-shell[data-rail='true'] .sidebar-brand {
+    padding: var(--space-1) 0 var(--space-4);
+    justify-content: center;
+  }
+  .app-shell[data-rail='true'] .sidebar-brand .link-state {
+    margin-left: 0;
+    position: absolute;
+    transform: translate(10px, -10px);
+  }
+  /* Le compteur ne peut plus s'aligner à droite d'un libellé absent : il devient
+     une pastille sur l'icône. */
+  .app-shell[data-rail='true'] .nav-link .count {
+    position: absolute;
+    transform: translate(12px, -10px);
+    margin: 0;
+  }
+
+  /* --- Navigation mobile : hors-canevas ---------------------------------- */
+
+  /* Qualifié par le parent : `.btn` déclare aussi display, plus loin dans la
+     feuille. À spécificité égale, c'est le dernier qui gagne, et le bouton de
+     navigation mobile restait visible en grand écran. */
+  .topbar .nav-toggle {
+    display: none;
+  }
+  .nav-scrim {
+    display: none;
+  }
+
+  @media (max-width: 900px) {
+    .sidebar {
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      z-index: var(--z-nav-mobile);
+      width: var(--sidebar-w);
+      transform: translateX(-100%);
+      box-shadow: var(--shadow-modal);
+    }
+    .app-shell[data-mobile-nav='open'] .sidebar {
+      transform: translateX(0);
+    }
+    /* Le rail n'a pas de sens en hors-canevas : les libellés reviennent. */
+    .app-shell[data-rail='true'] .sidebar {
+      width: var(--sidebar-w);
+      align-items: stretch;
+      padding-left: var(--space-3);
+      padding-right: var(--space-3);
+    }
+    .app-shell[data-rail='true'] .nav-label,
+    .app-shell[data-rail='true'] .brand-label {
+      display: inline;
+    }
+    .app-shell[data-rail='true'] .nav-link {
+      justify-content: flex-start;
+      width: auto;
+      padding: var(--space-2);
+    }
+    .app-shell[data-rail='true'] .nav-link .count {
+      position: static;
+      transform: none;
+      margin-left: auto;
+    }
+    .app-shell[data-rail='true'] .sidebar-brand {
+      justify-content: flex-start;
+      padding: var(--space-1) var(--space-2) var(--space-4);
+    }
+    .app-shell[data-rail='true'] .sidebar-brand .link-state {
+      position: static;
+      transform: none;
+      margin-left: auto;
+    }
+    .topbar .nav-toggle {
+      display: inline-flex;
+    }
+    .app-shell[data-mobile-nav='open'] .nav-scrim {
+      display: block;
+      position: fixed;
+      inset: 0;
+      z-index: calc(var(--z-nav-mobile) - 1);
+      background: rgba(4, 7, 12, 0.6);
+    }
+    .sidebar-collapse {
+      display: none;
+    }
+  }
+
+  .main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  /* --- Barre supérieure ----------------------------------------------------
+     Hiérarchie explicite. Les mesures qui déclenchent une action — runs actifs,
+     file d'attente — restent visibles jusqu'au mobile ; les mesures de contexte
+     — débit, tokens, coût, uptime — s'effacent d'abord. Six chiffres de même
+     poids, c'est six chiffres qu'on ne lit plus. */
+
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+    padding: var(--space-2) var(--space-5);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-panel);
+    min-height: var(--topbar-h);
+  }
+  .topbar .spacer {
+    flex: 1;
+  }
+
+  .stat-chip {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+  .stat-chip b {
+    color: var(--text);
+    font-size: var(--text-base);
+    font-variant-numeric: tabular-nums;
+  }
+  .stat-chip.alert b {
+    color: var(--warn);
+  }
+
+  @media (max-width: 1280px) {
+    .stat-chip.ctx {
+      display: none;
+    }
+  }
+  @media (max-width: 760px) {
+    .topbar {
+      padding: var(--space-2) var(--space-3);
+      gap: var(--space-3);
+    }
+    .stat-chip.secondary {
+      display: none;
+    }
+  }
+
+  /* Déclencheur de la palette de commandes. */
+  .palette-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text-faint);
+    font-family: var(--font);
+    font-size: var(--text-sm);
+    padding: var(--space-1) var(--space-2);
+    cursor: pointer;
+    transition:
+      border-color var(--dur-fast),
+      color var(--dur-fast);
+  }
+  .palette-trigger:hover {
+    border-color: var(--accent);
+    color: var(--text-muted);
+  }
+
+  .page {
+    flex: 1;
+    overflow-y: auto;
+    padding: var(--space-5);
+  }
+  @media (max-width: 760px) {
+    .page {
+      padding: var(--space-4) var(--space-3);
+    }
+  }
+  /* Page qui gère elle-même son défilement interne (Mission Control). */
+  .page.fixed {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .page-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+    flex-wrap: wrap;
+  }
+  .page-header .spacer {
+    flex: 1;
+  }
+  .page-header h1 {
+    margin: 0;
+  }
+  /* Chapeau de page : ce que la page permet de faire, en une phrase. */
+  .page-lede {
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    margin: calc(var(--space-3) * -1) 0 var(--space-4);
+    max-width: 72ch;
+  }
+
+  /* --- Cartes & grilles ---------------------------------------------------- */
+
+  .card {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+  }
+  .card.flush {
+    padding: 0;
+  }
+  .card.clickable {
+    cursor: pointer;
+    transition:
+      border-color var(--dur-fast),
+      background var(--dur-fast);
+  }
+  .card.clickable:hover {
+    border-color: var(--border-strong);
+    background: var(--bg-elevated);
+  }
+
+  .grid {
+    display: grid;
+    gap: var(--space-4);
+  }
+  .grid.cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .grid.cols-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .grid.cols-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  /* Grille auto-ajustée : une carte ne descend jamais sous 260px, et le nombre
+     de colonnes suit la place réellement disponible. */
+  .grid.auto {
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  }
+  @media (max-width: 1100px) {
+    .grid.cols-4,
+    .grid.cols-3 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 720px) {
+    .grid.cols-4,
+    .grid.cols-3,
+    .grid.cols-2 {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+  }
+  .col {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  /* --- Boutons -------------------------------------------------------------- */
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    background: var(--bg-elevated);
+    color: var(--text);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-base);
+    font-weight: 500;
+    font-family: var(--font);
+    cursor: pointer;
+    white-space: nowrap;
+    text-decoration: none;
+    transition:
+      background var(--dur-fast),
+      border-color var(--dur-fast),
+      transform var(--dur-fast);
+  }
+  .btn:hover {
+    background: var(--bg-hover);
+    text-decoration: none;
+  }
+  /* Retour tactile : le bouton s'enfonce sous le doigt. */
+  .btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+  .btn.primary:hover {
+    filter: brightness(1.08);
+  }
+  .btn.ok {
+    background: var(--ok);
+    border-color: var(--ok);
+    color: var(--ok-ink);
+    font-weight: 600;
+  }
+  .btn.ok:hover {
+    filter: brightness(1.08);
+  }
+  .btn.danger {
+    background: transparent;
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .btn.danger:hover {
+    background: var(--danger-dim);
+  }
+  .btn.ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-muted);
+  }
+  .btn.ghost:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+  .btn.sm {
+    padding: var(--space-1) var(--space-3);
+    font-size: var(--text-sm);
+  }
+  /* Bouton réduit à son icône : le libellé passe par aria-label, jamais nulle part. */
+  .btn.icon {
+    padding: var(--space-2);
+  }
+  .btn.icon.sm {
+    padding: var(--space-1);
+  }
+  .btn.block {
+    width: 100%;
+  }
+
+  .btn-group {
+    display: inline-flex;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  /* --- Badges & statuts ------------------------------------------------------ */
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-pill);
+    background: var(--bg-elevated);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .badge.accent {
+    background: var(--accent-dim);
+    color: var(--accent);
+    border-color: transparent;
+  }
+  .badge.ok {
+    background: var(--ok-dim);
+    color: var(--ok);
+    border-color: transparent;
+  }
+  .badge.warn {
+    background: var(--warn-dim);
+    color: var(--warn);
+    border-color: transparent;
+  }
+  .badge.danger {
+    background: var(--danger-dim);
+    color: var(--danger);
+    border-color: transparent;
+  }
+  .badge.violet {
+    background: var(--violet-dim);
+    color: var(--violet);
+    border-color: transparent;
+  }
+
+  /* Pastille de statut : elle porte un état machine réel, jamais un ornement.
+     L'animation ne survit pas à prefers-reduced-motion. */
+  .status-dot {
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .status-dot.running {
+    background: var(--accent);
+    animation: pulse 1.8s infinite;
+  }
+  .status-dot.queued {
+    background: var(--warn);
+  }
+  .status-dot.waiting_approval {
+    background: var(--warn);
+    animation: pulse 1.2s infinite;
+  }
+  .status-dot.succeeded {
+    background: var(--ok);
+  }
+  .status-dot.failed,
+  .status-dot.timeout {
+    background: var(--danger);
+  }
+  .status-dot.cancelled {
+    background: var(--text-faint);
+  }
+
+  @keyframes pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+
+  /* --- Formulaires ---------------------------------------------------------- */
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    margin-bottom: var(--space-3);
+  }
+  .field-label {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+  .field .hint {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+  }
+
+  .input,
+  .select,
+  .textarea {
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-base);
+    font-family: var(--font);
+    width: 100%;
+    transition: border-color var(--dur-fast);
+  }
+  /* Le texte indicatif reste lisible : il porte souvent le seul exemple du
+     format attendu. Un placeholder gris pâle est une information perdue. */
+  .input::placeholder,
+  .textarea::placeholder {
+    color: var(--text-faint);
+    opacity: 1;
+  }
+  .textarea {
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    min-height: 120px;
+    resize: vertical;
+    line-height: var(--leading-loose);
+  }
+  .input:focus,
+  .select:focus,
+  .textarea:focus {
+    border-color: var(--accent);
+  }
+  .input:focus-visible,
+  .select:focus-visible,
+  .textarea:focus-visible {
+    outline-offset: 1px;
+  }
+  .input:disabled,
+  .select:disabled,
+  .textarea:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .input.invalid,
+  .select.invalid,
+  .textarea.invalid {
+    border-color: var(--danger);
+  }
+
+  .checkbox-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-size: var(--text-base);
+  }
+  .checkbox-row input {
+    accent-color: var(--accent);
+  }
+
+  /* --- Tableaux ------------------------------------------------------------
+     L'en-tête colle quand le conteneur défile : sur cent runs, une colonne sans
+     intitulé n'est plus une colonne. */
+
+  .table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-base);
+  }
+  .table th {
+    text-align: left;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-panel);
+    position: sticky;
+    top: 0;
+    z-index: var(--z-sticky);
+  }
+  .table td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+    vertical-align: middle;
+  }
+  .table tbody tr:last-child td {
+    border-bottom: none;
+  }
+  .table tr.clickable {
+    cursor: pointer;
+  }
+  .table tr.clickable:hover td {
+    background: var(--bg-hover);
+  }
+  .table .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Enveloppe de tableau : cadre, coins, et défilement horizontal sur petit
+     écran plutôt qu'une mise en page qui déborde. */
+  .table-wrap {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: auto;
+    background: var(--bg-panel);
+  }
+
+  /* --- Modale & tiroir ------------------------------------------------------ */
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal);
+    background: rgba(4, 7, 12, 0.72);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 6vh var(--space-5) var(--space-5);
+    backdrop-filter: blur(2px);
+    overflow-y: auto;
+  }
+  .modal {
+    background: var(--bg-panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    width: 100%;
+    max-width: 640px;
+    max-height: 86dvh;
+    overflow-y: auto;
+    padding: var(--space-5);
+    box-shadow: var(--shadow-modal);
+  }
+  .modal.wide {
+    max-width: 900px;
+  }
+  .modal.narrow {
+    max-width: 440px;
+  }
+  .modal-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+  .modal-title h2 {
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--space-3);
+    margin-top: var(--space-5);
+    flex-wrap: wrap;
+  }
+  @media (max-width: 760px) {
+    .modal-overlay {
+      padding: var(--space-3);
+    }
+    .modal {
+      padding: var(--space-4);
+    }
+  }
+
+  .drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: var(--z-drawer);
+    width: 420px;
+    max-width: 92vw;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-modal);
+    overflow-y: auto;
+    padding: var(--space-4);
+  }
+
+  /* --- Palette de commandes ------------------------------------------------
+     Une console d'exploitation se pilote au clavier. Ctrl/⌘ + K ouvre la
+     palette : atteindre une page, ouvrir un agent, lancer un run. */
+
+  .palette-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-palette);
+    background: rgba(4, 7, 12, 0.7);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 12vh var(--space-4) var(--space-4);
+    backdrop-filter: blur(2px);
+  }
+  .palette {
+    width: 100%;
+    max-width: 560px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-modal);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    max-height: 70dvh;
+  }
+  .palette-input-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    color: var(--text-faint);
+  }
+  .palette-input {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: var(--text-md);
+    padding: 0;
+  }
+  .palette-input:focus {
+    outline: none;
+  }
+  .palette-input::placeholder {
+    color: var(--text-faint);
+    opacity: 1;
+  }
+  .palette-list {
+    list-style: none;
+    margin: 0;
+    padding: var(--space-2);
+    overflow-y: auto;
+  }
+  .palette-group {
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+    padding: var(--space-2) var(--space-2) var(--space-1);
+  }
+  .palette-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .palette-item .palette-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+  .palette-item .palette-hint {
+    margin-left: auto;
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+  }
+  .palette-item[aria-selected='true'] {
+    background: var(--accent-dim);
+    color: var(--accent);
+  }
+  .palette-item[aria-selected='true'] .palette-icon {
+    color: var(--accent);
+  }
+  .palette-empty {
+    padding: var(--space-5);
+    text-align: center;
+    color: var(--text-faint);
+    font-size: var(--text-sm);
+  }
+  .palette-footer {
+    border-top: 1px solid var(--border);
+    padding: var(--space-2) var(--space-4);
+    display: flex;
+    gap: var(--space-4);
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    flex-wrap: wrap;
+  }
+
+  /* --- Journal d'événements (Mission Control) ------------------------------ */
+
+  .log-feed {
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+  }
+  .log-line {
+    display: flex;
+    gap: var(--space-2);
+    padding: 2px var(--space-2);
+    border-radius: 4px;
+    align-items: baseline;
+  }
+  .log-line:hover {
+    background: var(--bg-hover);
+  }
+  .log-line .ts {
+    color: var(--text-faint);
+    flex-shrink: 0;
+  }
+  .log-line .src {
+    color: var(--violet);
+    flex-shrink: 0;
+    min-width: 76px;
+  }
+  .log-line .msg {
+    color: var(--text-muted);
+    word-break: break-word;
+  }
+  .log-line.success .msg {
+    color: var(--ok);
+  }
+  .log-line.warn .msg {
+    color: var(--warn);
+  }
+  .log-line.error .msg {
+    color: var(--danger);
+  }
+
+  /* --- Kanban -------------------------------------------------------------- */
+
+  .kanban {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: var(--space-4);
+    align-items: start;
+  }
+  @media (max-width: 1000px) {
+    .kanban {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 640px) {
+    .kanban {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  .kanban-col {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--space-3);
+    min-height: 220px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .kanban-col.drag-over {
+    border-color: var(--accent);
+    background: var(--accent-dim);
+  }
+  .kanban-col-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 2px var(--space-1) var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+  }
+  .kanban-col-header .count {
+    margin-left: auto;
+    color: var(--text-faint);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .kanban-card {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3);
+    cursor: grab;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+  }
+  .kanban-card:hover {
+    border-color: var(--border-strong);
+  }
+  .kanban-card.dragging {
+    opacity: 0.4;
+  }
+  .kanban-card .title {
+    font-weight: 600;
+    font-size: var(--text-base);
+  }
+  .kanban-card .meta {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+
+  /* --- Transcript (RunDetail) ---------------------------------------------- */
+
+  .transcript {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    max-width: 900px;
+  }
+  .t-event {
+    border-left: 3px solid var(--border-strong);
+    padding: var(--space-2) var(--space-3);
+  }
+  .t-event .t-head {
+    font-size: var(--text-xs);
+    color: var(--text-faint);
+    margin-bottom: 3px;
+    font-family: var(--mono);
+  }
+  .t-event.assistant {
+    border-color: var(--accent);
+  }
+  .t-event.assistant .t-body {
+    white-space: pre-wrap;
+    line-height: var(--leading-loose);
+  }
+  .t-event.thinking {
+    border-color: var(--violet);
+  }
+  .t-event.thinking .t-body {
+    color: var(--text-muted);
+    font-style: italic;
+    white-space: pre-wrap;
+    font-size: var(--text-base);
+  }
+  .t-event.tool {
+    border-color: var(--warn);
+  }
+  .t-event.tool .t-body,
+  .t-event.result .t-body {
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-muted);
+    background: var(--bg);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .t-event.error {
+    border-color: var(--danger);
+  }
+  .t-event.error .t-body {
+    color: var(--danger);
+    white-space: pre-wrap;
+  }
+  .t-event.result {
+    border-color: var(--ok);
+  }
+
+  /* --- États vides & chargement -------------------------------------------- */
+
+  .empty-state {
+    text-align: center;
+    padding: var(--space-8) var(--space-5);
+    color: var(--text-muted);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+  }
+  .empty-state .icon {
+    color: var(--text-faint);
+    margin-bottom: var(--space-3);
+    display: flex;
+    justify-content: center;
+  }
+  .empty-state .empty-title {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .empty-state .empty-hint {
+    font-size: var(--text-sm);
+    color: var(--text-faint);
+    margin-top: var(--space-1);
+    max-width: 46ch;
+    margin-inline: auto;
+  }
+  .empty-state .empty-action {
+    margin-top: var(--space-4);
+    display: flex;
+    justify-content: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+  /* État vide compact, pour un panneau latéral. */
+  .empty-state.compact {
+    padding: var(--space-5) var(--space-3);
+  }
+
+  /* Squelette de chargement : il prend la forme du contenu attendu, pour que la
+     page ne saute pas à l'arrivée des données. */
+  .skeleton {
+    background: var(--bg-elevated);
+    border-radius: var(--radius-sm);
+    height: 12px;
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes skeleton-pulse {
+    50% {
+      opacity: 0.45;
+    }
+  }
+
+  .agent-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: var(--bg-elevated);
+    border: 2px solid var(--border-strong);
+    flex-shrink: 0;
+    line-height: 1;
+  }
+
+  .tabs {
+    display: flex;
+    gap: var(--space-1);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--space-4);
+    overflow-x: auto;
+  }
+  .tab {
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-base);
+    font-weight: 500;
+    color: var(--text-muted);
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-family: var(--font);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    white-space: nowrap;
+  }
+  .tab:hover {
+    color: var(--text);
+  }
+  .tab.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .kv {
+    display: grid;
+    grid-template-columns: 160px minmax(0, 1fr);
+    gap: var(--space-1) var(--space-4);
+    font-size: var(--text-base);
+  }
+  .kv dt {
+    color: var(--text-faint);
+  }
+  .kv dd {
+    margin: 0;
+    min-width: 0;
+  }
+  @media (max-width: 640px) {
+    .kv {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+    }
+    .kv dt {
+      margin-top: var(--space-2);
+    }
+  }
+
+  /* --- Accessibilité & sobriété -------------------------------------------
+   *
+   * Toute animation est conditionnelle. Un tableau de bord reste ouvert des
+   * heures : des pastilles qui pulsent en permanence coûtent de l'attention, et
+   * gênent réellement une partie des utilisateurs. Le réglage système fait loi.
+   * Les canvas (graphe, radar) interrogent la même préférence en JavaScript.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Le flou de la modale et de la palette ne porte aucune information : il
+     disparaît si l'utilisateur refuse la transparence. */
+  @media (prefers-reduced-transparency: reduce) {
+    .modal-overlay,
+    .palette-overlay {
+      backdrop-filter: none;
+      background: rgba(4, 7, 12, 0.94);
+    }
+  }
+
+  .spinner {
+    display: inline-flex;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* Écran de connexion : la carte ne contient qu'un champ, largeur bornée. */
+  .login-viewport {
+    height: 100dvh;
+    padding: var(--space-4);
+  }
+  .w-login {
+    width: 100%;
+    max-width: 380px;
+  }
+
+  /* --- Mission Control ----------------------------------------------------
+     Graphe et colonne d'inspection côte à côte, empilés dès qu'il n'y a plus la
+     place. Sans cette bascule, le panneau de 360px écrasait le graphe. */
+  .mc-launch {
+    flex-shrink: 0;
+    margin-bottom: var(--space-4);
+    flex-wrap: wrap;
+  }
+  .mc-layout {
+    display: flex;
+    gap: var(--space-4);
+    flex: 1;
+    min-height: 0;
+    align-items: stretch;
+  }
+  .mc-graph {
+    flex: 1;
+    min-width: 0;
+    position: relative;
+    overflow: hidden;
+    padding: 0;
+  }
+  .mc-inspector {
+    max-height: 58%;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  @media (max-width: 1000px) {
+    .mc-layout {
+      flex-direction: column;
+    }
+    .panel-side {
+      width: 100%;
+    }
+    .mc-graph {
+      min-height: 340px;
+    }
+    .mc-inspector {
+      max-height: none;
+    }
+    /* Une page qui empile ne peut plus contenir son défilement. */
+    .page.fixed {
+      overflow-y: auto;
+    }
+  }
+
+  /* En-tête collant : il ne fonctionne que si le tableau défile dans son propre
+     conteneur. `.table-wrap.fill` dans une `.page.fixed` donne ce conteneur, et
+     la barre de filtres reste visible au-dessus. */
+  .table-wrap.fill {
+    min-height: 0;
+  }
+  /* Barre de filtres d'une page de liste : elle passe à la ligne, elle ne
+     déborde pas. */
+  .filter-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  @media (max-width: 760px) {
+    .filter-bar .select {
+      width: 100%;
+    }
+  }
+
+  /* Carte qui attend une décision de l'utilisateur. */
+  .card.attention {
+    border-color: var(--warn);
+  }
+
+  /* Demande d'approbation dans un transcript : elle reste visible pendant qu'on
+     lit le reste du run, sinon elle défile hors de vue et le run attend. */
+  .approval-sticky {
+    position: sticky;
+    top: calc(var(--space-5) * -1);
+    z-index: var(--z-sticky);
+    box-shadow: var(--shadow-pop);
+  }
+
+  /* Carte de conclusion réussie : la bordure verte signale le résultat final. */
+  .card-ok {
+    border-color: var(--ok);
+  }
+
+  /* Texte tronqué à N lignes : description d'agent, résumé de gabarit. Le
+     nombre de lignes est fixe pour que les cartes d'une grille gardent la même
+     hauteur. */
+  .clamp-2,
+  .clamp-3 {
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+  }
+  .clamp-2 {
+    -webkit-line-clamp: 2;
+    min-height: 40px;
+  }
+  .clamp-3 {
+    -webkit-line-clamp: 3;
+  }
+
+  /* Sélecteur de couleur natif : il a besoin d'une hauteur explicite pour
+     s'aligner sur les autres contrôles. */
+  .input[type='color'] {
+    padding: 3px;
+    height: 36px;
+    cursor: pointer;
+  }
+
+  /* Vignette de gabarit dans le choix de création d'agent. */
+  .template-mark {
+    font-size: var(--text-xl);
+    margin-bottom: var(--space-1);
+    line-height: 1;
+  }
+
+  /* Grand nombre d'une carte de mesure. Chiffres tabulaires : une valeur qui
+     change ne fait plus sautiller celles d'à côté. */
+  .metric {
+    font-size: var(--text-xl);
+    font-weight: 700;
+    line-height: var(--leading-tight);
+    font-variant-numeric: tabular-nums;
+  }
+  /* Cellule de tableau qui porte un texte long : elle se coupe au lieu de
+     pousser la colonne suivante hors de l'écran. */
+  .cell-clip {
+    max-width: 360px;
+  }
+  .cell-clip > span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Panneau de contenu long : au-delà, une ligne de texte devient pénible à
+     suivre d'un bord à l'autre. */
+  .panel-wide {
+    max-width: 900px;
+  }
+
+  /* --- Radar --------------------------------------------------------------
+     Le scope reste carré et prend la place restante ; la colonne de détail
+     passe dessous quand l'écran ne peut plus tenir les deux. */
+  .radar-layout {
+    display: flex;
+    gap: var(--space-4);
+    align-items: stretch;
+  }
+  .radar-scope {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    position: relative;
+    aspect-ratio: 1 / 1;
+    overflow: hidden;
+  }
+  .panel-side-wide {
+    width: 420px;
+    flex-shrink: 0;
+  }
+  @media (max-width: 1100px) {
+    .radar-layout {
+      flex-direction: column;
+    }
+    .panel-side-wide {
+      width: 100%;
+    }
+  }
+
+  /* Aperçu monospace tronqué à trois lignes : contenu d'une skill, extrait d'un
+     fichier. */
+  .mono-preview {
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+  }
+  /* Bloc encadré sans être une carte : élément de liste dans un panneau. */
+  .tile {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3);
+  }
+
+  /* Dernier paragraphe d'un panneau : pas de marge basse qui déséquilibre. */
+  .mb-0 {
+    margin-bottom: 0;
+  }
+
+  /* Aperçu court : quelques lignes de contexte, pas un transcript. */
+  .scroll-box.short {
+    max-height: 160px;
+  }
+
+  /* En-tête de bloc dépliable : le curseur dit que c'est cliquable. */
+  .summary-toggle {
+    cursor: pointer;
+  }
+
+  /* Avertissement encadré : import d'une skill ou d'un subagent distant. Le
+     texte dit le risque, l'encadré le rend impossible à survoler sans le voir. */
+  .warn-box {
+    border: 1px solid var(--warn);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--warn);
+    display: flex;
+    gap: var(--space-2);
+    align-items: flex-start;
+  }
+  .warn-box .warn-icon {
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  /* Carte compacte de résultat de catalogue : plus serrée qu'une carte de page. */
+  .card.tile-card {
+    padding: var(--space-3);
+  }
+
+  /* --- Graphiques ---------------------------------------------------------- */
+  .chart-host {
+    width: 100%;
+  }
+  .chart-svg {
+    display: block;
+  }
+  /* Pastille de légende : sa couleur est la seule valeur inline légitime, elle
+     vient de la série de données. */
+  .legend-swatch {
+    width: 10px;
+    height: 10px;
+    display: inline-block;
+    flex-shrink: 0;
+    border-radius: 2px;
+  }
+
+  /* --- Canvas (graphe, radar) ---------------------------------------------
+     Le canvas remplit son parent positionné, et ne capte pas le geste de
+     défilement tactile : sur mobile, un canvas plein écran qui absorbe le
+     toucher rend la page impossible à faire défiler. */
+  .canvas-host {
+    position: absolute;
+    inset: 0;
+  }
+  .canvas-fill {
+    width: 100%;
+    height: 100%;
+    display: block;
+    touch-action: none;
+  }
+
+  /* Barre d'actions d'une modale longue : elle reste au bas du cadre pendant que
+     le formulaire défile. Sans cela, sur un écran de portable, le bouton de
+     validation d'un formulaire de vingt champs se trouve hors de vue. */
+  .modal-actions {
+    position: sticky;
+    bottom: calc(var(--space-5) * -1);
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-3);
+    padding-bottom: var(--space-3);
+    margin-bottom: calc(var(--space-5) * -1);
+  }
+  @media (max-width: 760px) {
+    .modal-actions {
+      bottom: calc(var(--space-4) * -1);
+      margin-bottom: calc(var(--space-4) * -1);
+    }
+  }
+
+  /* --- Frontière d'erreur -------------------------------------------------- */
+  .card.boundary {
+    border-color: var(--danger);
+    max-width: 720px;
+  }
+
+  /* --- Lien d'évitement ---------------------------------------------------
+     Au clavier, il fallait traverser les douze liens de navigation avant
+     d'atteindre le contenu, sur chaque page. Le lien reste invisible jusqu'à ce
+     qu'il prenne le focus. */
+  .skip-link {
+    position: fixed;
+    top: var(--space-2);
+    left: var(--space-2);
+    z-index: calc(var(--z-nav-mobile) + 1);
+    transform: translateY(-200%);
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-sm);
+    text-decoration: none;
+    transition: transform var(--dur) var(--ease);
+  }
+  /* `:focus` et non `:focus-visible` : le lien est hors écran, donc
+     inatteignable autrement qu'au clavier. Tout focus qu'il reçoit est un focus
+     clavier, et `:focus-visible` dépend d'heuristiques qui ne se déclenchent pas
+     sur un focus programmatique — le lien restait alors invisible. */
+  .skip-link:focus {
+    transform: translateY(0);
+    text-decoration: none;
+  }
+  /* La cible du lien ne doit pas afficher d'anneau : elle n'est focusable que
+     pour recevoir le saut, l'utilisateur ne l'atteint pas par tabulation. */
+  .main:focus {
+    outline: none;
+  }
+
+  /* --- Notifications transitoires ----------------------------------------
+     En bas à droite : hors du chemin du regard, qui suit le contenu, mais dans
+     le champ visuel. La zone reste en place même vide, pour que l'arrivée d'une
+     notification ne décale rien. */
+  .toast-host {
+    position: fixed;
+    bottom: var(--space-4);
+    right: var(--space-4);
+    z-index: var(--z-palette);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    pointer-events: none;
+    max-width: min(380px, calc(100vw - var(--space-8)));
+  }
+  .toast {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
+    font-size: var(--text-base);
+    box-shadow: var(--shadow-pop);
+    pointer-events: auto;
+    animation: toast-in var(--dur) var(--ease);
+  }
+  .toast.ok {
+    border-left: 3px solid var(--ok);
+  }
+  .toast.info {
+    border-left: 3px solid var(--accent);
+  }
+  .toast .toast-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+  }
+  .toast.ok .toast-icon {
+    color: var(--ok);
+  }
+  .toast.info .toast-icon {
+    color: var(--accent);
+  }
+  @keyframes toast-in {
+    from {
+      transform: translateY(8px);
+      opacity: 0;
+    }
+  }
+
+  /* Retour en bas d'un transcript : un run actif continue d'écrire pendant qu'on
+     lit plus haut, et l'auto-défilement reste suspendu tant qu'on n'est pas
+     revenu au pied du fil. */
+  .jump-bottom {
+    position: fixed;
+    bottom: var(--space-5);
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: var(--z-sticky);
+    box-shadow: var(--shadow-pop);
+  }
+  .jump-bottom:active:not(:disabled) {
+    transform: translateX(-50%) translateY(1px);
+  }
+
+  /* En-tête de colonne triable : un vrai bouton, pour être atteignable au clavier
+     et annoncé comme actionnable. L'état du tri est porté par `aria-sort` sur la
+     cellule, pas par la seule couleur. */
+  .th-sort {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    text-transform: inherit;
+    letter-spacing: inherit;
+    cursor: pointer;
+  }
+  .th-sort:hover {
+    color: var(--text);
+  }
+  /* Au repos, l'indicateur annonce la possibilité de trier sans laisser croire
+     que la colonne est déjà triée. */
+  .th-sort-idle {
+    opacity: 0.35;
+  }
+  .table th[aria-sort='ascending'] .th-sort,
+  .table th[aria-sort='descending'] .th-sort {
+    color: var(--accent);
+  }
+}
+
+@layer utilities {
+  /* ==========================================================================
+     Utilitaires
+     Ils existent parce que l'audit a compté 265 styles inline dans les pages.
+     Chaque classe ici remplace une déclaration répétée à la main.
+     ========================================================================== */
+
+  /* Couleur, taille, graisse */
+  .text-muted {
+    color: var(--text-muted);
+  }
+  .text-faint {
+    color: var(--text-faint);
+  }
+  .text-danger {
+    color: var(--danger);
+  }
+  .text-ok {
+    color: var(--ok);
+  }
+  .text-warn {
+    color: var(--warn);
+  }
+  .text-accent {
+    color: var(--accent);
+  }
+  .text-xs {
+    font-size: var(--text-xs);
+  }
+  .text-sm {
+    font-size: var(--text-sm);
+  }
+  .text-md {
+    font-size: var(--text-md);
+  }
+  .text-lg {
+    font-size: var(--text-lg);
+  }
+  .text-strong {
+    font-weight: 600;
+  }
+  .text-center {
+    text-align: center;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Intitulé de sous-section, à l'intérieur d'une carte. */
+  .section-label {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-faint);
+    margin-bottom: var(--space-2);
+  }
+
+  /* Débordement & lisibilité du texte */
+  .ellipsis {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .break-all {
+    word-break: break-all;
+  }
+  .break-word {
+    word-break: break-word;
+  }
+  .pre-wrap {
+    white-space: pre-wrap;
+  }
+  .nowrap {
+    white-space: nowrap;
+  }
+  .prose {
+    max-width: 72ch;
+    line-height: var(--leading-loose);
+  }
+
+  /* Flux : piles, gouttières, alignements */
+  .stack {
+    display: flex;
+    flex-direction: column;
+  }
+  .stack.gap-1 {
+    gap: var(--space-1);
+  }
+  .stack.gap-2 {
+    gap: var(--space-2);
+  }
+  .stack.gap-3 {
+    gap: var(--space-3);
+  }
+  .stack.gap-4 {
+    gap: var(--space-4);
+  }
+  .row.gap-1 {
+    gap: var(--space-1);
+  }
+  .row.gap-2 {
+    gap: var(--space-2);
+  }
+  .row.gap-4 {
+    gap: var(--space-4);
+  }
+  .col.gap-1 {
+    gap: var(--space-1);
+  }
+  .col.gap-2 {
+    gap: var(--space-2);
+  }
+  .col.gap-4 {
+    gap: var(--space-4);
+  }
+  .wrap {
+    flex-wrap: wrap;
+  }
+  .grow {
+    flex: 1;
+    min-width: 0;
+  }
+  .shrink-0 {
+    flex-shrink: 0;
+  }
+  .min-0 {
+    min-width: 0;
+    min-height: 0;
+  }
+  .items-start {
+    align-items: flex-start;
+  }
+  .items-baseline {
+    align-items: baseline;
+  }
+  .items-stretch {
+    align-items: stretch;
+  }
+  .justify-between {
+    justify-content: space-between;
+  }
+  .justify-end {
+    justify-content: flex-end;
+  }
+  .justify-center {
+    justify-content: center;
+  }
+  .ml-auto {
+    margin-left: auto;
+  }
+  .mt-2 {
+    margin-top: var(--space-2);
+  }
+  .mt-3 {
+    margin-top: var(--space-3);
+  }
+  .mt-4 {
+    margin-top: var(--space-4);
+  }
+  .mb-2 {
+    margin-bottom: var(--space-2);
+  }
+  .mb-3 {
+    margin-bottom: var(--space-3);
+  }
+  .mb-4 {
+    margin-bottom: var(--space-4);
+  }
+
+  /* Occupe la place disponible dans un parent en flux. */
+  .fill {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+  }
+  /* Centre son contenu en couvrant tout le parent. */
+  .center {
+    display: grid;
+    place-items: center;
+  }
+  /* Se superpose au parent en position relative, contenu centré. */
+  .overlay-center {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: var(--space-4);
+  }
+  .relative {
+    position: relative;
+  }
+  .clip {
+    overflow: hidden;
+  }
+
+  /* Zone défilante bornée : transcripts, manifestes, aperçus de contenu. */
+  .scroll-box {
+    font-family: var(--mono);
+    font-size: var(--text-sm);
+    white-space: pre-wrap;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3);
+    max-height: 320px;
+    overflow-y: auto;
+    margin: 0;
+    line-height: var(--leading);
+  }
+  .scroll-box.tall {
+    max-height: 420px;
+  }
+  .scroll-y {
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  /* Zone d'erreur : annoncée aux lecteurs d'écran via aria-live côté composant. */
+  .error-text {
+    color: var(--danger);
+    font-size: var(--text-base);
+  }
+  /* Encart d'erreur, quand le message doit être vu avant l'action. */
+  .error-box {
+    color: var(--danger);
+    background: var(--danger-dim);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+  }
+
+  /* Largeurs de contrôle nommées : elles remplacent les width: 230 en dur. */
+  .w-sm {
+    width: 140px;
+    flex-shrink: 0;
+  }
+  .w-md {
+    width: 200px;
+    flex-shrink: 0;
+  }
+  .w-lg {
+    width: 260px;
+    flex-shrink: 0;
+  }
+  .panel-side {
+    width: 360px;
+    flex-shrink: 0;
+  }
+  @media (max-width: 1100px) {
+    .panel-side {
+      width: 300px;
+    }
+  }
+
+  /* Indicateur d'attente : la seule animation en boucle admise hors pastille de
+     statut, et elle ne tourne que pendant une opération réellement en cours. */
+}
+
+/* Carte d'un élément désactivé : présent, mais hors service. L'opacité seule ne
+   suffirait pas, un badge le dit aussi dans le contenu. */
+@layer components {
+  .card.card-off {
+    opacity: 0.62;
+    border-style: dashed;
+  }
+}
+
+@layer components {
+  /* Champ de requête d'essai : assez large pour une question entière. */
+  .w-search {
+    width: 420px;
+    max-width: 100%;
+  }
+}
+
+@layer components {
+  /* Bloc d'échec : la couleur double le message, elle ne le remplace pas. */
+  .tile-danger {
+    border-color: var(--danger);
+  }
+  /* Entrée présente mais non retenable, dans une liste de choix. */
+  .tile-off {
+    opacity: 0.55;
+  }
+}
+
+@layer components {
+  /* --- Graphe d'une collection RAG --------------------------------------
+     Le canevas prend la place restante, le panneau de lecture passe dessous
+     quand l'écran ne peut plus tenir les deux côte à côte. */
+  .rag-graph-layout {
+    display: flex;
+    gap: var(--space-4);
+    align-items: stretch;
+  }
+  .rag-graph-canvas {
+    flex: 1;
+    min-width: 0;
+    padding: 0;
+    position: relative;
+    overflow: hidden;
+    min-height: 560px;
+  }
+  @media (max-width: 1100px) {
+    .rag-graph-layout {
+      flex-direction: column;
+    }
+    .rag-graph-canvas {
+      min-height: 380px;
+    }
+  }
+}
