@@ -17,7 +17,8 @@
  * Environnement :
  *   MAESTRO_URL        défaut http://localhost:4520
  *   MAESTRO_TOKEN      défaut : contenu de ~/.maestro/token
- *   CLAUDE_INDEX_DIR   défaut : cible du lien ~/.claude/agents, sinon ~/Projets/claude-index
+ *   CLAUDE_INDEX_DIR   défaut : cible du lien ~/.claude/agents, sinon le dépôt
+ *                      claude-index voisin de celui-ci
  */
 import { readFileSync, readdirSync, realpathSync, existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -35,7 +36,16 @@ function resolveAgentsDir() {
     // ~/.claude/agents est un lien vers <claude-index>/claude/agents.
     return realpathSync(linked);
   } catch {
-    return join(homedir(), 'Projets', 'claude-index', 'claude', 'agents');
+    /*
+     * Repli : le dépôt claude-index voisin de celui-ci.
+     *
+     * Déduit de l'emplacement du script, et non d'un chemin absolu sous le
+     * répertoire personnel : les deux dépôts vivent côte à côte et ont déjà
+     * été déplacés ensemble plusieurs fois. Un chemin en dur pointait encore
+     * vers ~/Projets, disparu depuis, et ce repli n'aurait plus rien trouvé.
+     */
+    const here = new URL('..', import.meta.url).pathname;
+    return join(here, '..', 'claude-index', 'claude', 'agents');
   }
 }
 
