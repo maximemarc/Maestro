@@ -8,6 +8,7 @@ import {
   FlowArrow,
   Gauge,
   Gear,
+  House,
   Kanban,
   Lightning,
   List,
@@ -42,6 +43,7 @@ import LoginPage from './pages/LoginPage';
  * Le découpage par route ne change rien à la navigation et allège le premier
  * écran, qui est le seul que l'utilisateur attend.
  */
+const HomePage = lazy(() => import('./pages/HomePage'));
 const MissionControl = lazy(() => import('./pages/MissionControl'));
 const RadarPage = lazy(() => import('./pages/RadarPage'));
 const AgentsPage = lazy(() => import('./pages/AgentsPage'));
@@ -74,7 +76,8 @@ interface NavItem {
  * par l'utilisateur : l'avatar d'un agent.
  */
 const NAV: NavItem[] = [
-  { to: '/', icon: Gauge, label: 'Mission Control', end: true },
+  { to: '/', icon: House, label: 'Accueil', end: true },
+  { to: '/mission-control', icon: Gauge, label: 'Mission Control' },
   { to: '/radar', icon: Radio, label: 'Radar' },
   { to: '/agents', icon: Robot, label: 'Agents' },
   { to: '/runs', icon: Lightning, label: 'Runs' },
@@ -415,7 +418,8 @@ export default function App() {
             <ErrorBoundary resetKey={location.pathname}>
               <Suspense fallback={<PageSkeleton />}>
                 <Routes>
-                  <Route path="/" element={<MissionControl />} />
+                  <Route path="/" element={<HomePage />} />
+                  <Route path="/mission-control" element={<MissionControl />} />
                   <Route path="/radar" element={<RadarPage />} />
                   <Route path="/agents" element={<AgentsPage />} />
                   <Route path="/agents/:id" element={<AgentDetail />} />

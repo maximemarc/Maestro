@@ -2303,4 +2303,72 @@
       transition: none;
     }
   }
+  /* -------------------------------------------------------------------------
+     Accueil : file d'arbitrage, listes et chiffres du jour
+     -------------------------------------------------------------------------
+     Des lignes séparées par un filet plutôt que des cartes : la file est un
+     inventaire d'actions à balayer, et une carte par ligne y ajouterait du
+     cadre sans ajouter de hiérarchie. */
+
+  .home-queue,
+  .home-list {
+    list-style: none;
+    margin: var(--space-3) 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .home-queue-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) 0;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  /* Pas de filet sous le dernier élément : il soulignerait le vide. */
+  .home-queue-item:last-child {
+    border-bottom: none;
+  }
+
+  .home-list > li {
+    padding: var(--space-2) 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .home-list > li:last-child {
+    border-bottom: none;
+  }
+
+  .home-queue-icon {
+    flex: none;
+    color: var(--text-muted);
+  }
+  .home-queue-icon.warn {
+    color: var(--warn);
+  }
+  .home-queue-icon.danger {
+    color: var(--danger);
+  }
+
+  .home-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3);
+    margin: var(--space-3) 0 var(--space-4);
+  }
+  .home-stats dt {
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+  }
+  .home-stats dd {
+    margin: 0;
+    font-size: var(--text-lg);
+  }
+
+  @media (max-width: 720px) {
+    .home-stats {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
 }
