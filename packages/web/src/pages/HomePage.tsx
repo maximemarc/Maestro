@@ -22,7 +22,12 @@ import {
   ShieldCheck,
   Warning,
 } from '@phosphor-icons/react';
-import type { Approval, KanbanTask, Run } from '@maestro/shared';
+import {
+  RUN_INTERRUPTED_BY_RESTART,
+  type Approval,
+  type KanbanTask,
+  type Run,
+} from '@maestro/shared';
 import { fmtCost, fmtDateTime, fmtTokens } from '../lib/format';
 import { useStore } from '../lib/store';
 import { AgentChip, EmptyState, StatusBadge } from '../components/ui';
@@ -63,7 +68,13 @@ export default function HomePage() {
     const failed = runs
       .filter(
         (r) =>
-          r.status === 'failed' && r.endedAt && now - Date.parse(r.endedAt) < FAILURE_WINDOW_MS,
+          r.status === 'failed' &&
+          r.endedAt &&
+          now - Date.parse(r.endedAt) < FAILURE_WINDOW_MS &&
+          /* Un run clôturé par un redémarrage n'a pas échoué au sens utile : il
+             n'y a rien à décider ni à corriger, et l'afficher noyait les vrais
+             échecs à chaque relance du serveur. */
+          r.error !== RUN_INTERRUPTED_BY_RESTART,
       )
       .map((run): Pending => ({ kind: 'failure', id: run.id, run }));
 

@@ -10,7 +10,7 @@ import Fastify from 'fastify';
 import fastifyCors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
-import type { ServerEvent } from '@maestro/shared';
+import { RUN_INTERRUPTED_BY_RESTART, type ServerEvent } from '@maestro/shared';
 import { AgentService } from './agents.ts';
 import { Bus } from './bus.ts';
 import { loadConfig } from './config.ts';
@@ -39,7 +39,7 @@ const bus = new Bus(store);
 const startedAt = nowIso();
 
 // Les runs restés « actifs » après un arrêt brutal sont clôturés proprement.
-const stale = store.failStaleActiveRuns('Interrompu par un redémarrage du serveur');
+const stale = store.failStaleActiveRuns(RUN_INTERRUPTED_BY_RESTART);
 if (stale > 0) bus.log('warn', 'server', `${stale} run(s) orphelin(s) clôturé(s) au démarrage`);
 
 // Une approbation en attente n'a plus personne à débloquer : la promesse qui la

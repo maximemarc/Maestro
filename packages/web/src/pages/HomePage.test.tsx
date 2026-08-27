@@ -9,7 +9,13 @@
 import { cleanup, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { AgentConfig, Approval, KanbanTask, Run } from '@maestro/shared';
+import {
+  RUN_INTERRUPTED_BY_RESTART,
+  type AgentConfig,
+  type Approval,
+  type KanbanTask,
+  type Run,
+} from '@maestro/shared';
 import { useStore } from '../lib/store';
 import HomePage from './HomePage';
 
@@ -135,5 +141,22 @@ describe('file d’arbitrage', () => {
     show();
     expect(screen.getByText(/Rapprocher les écritures bancaires/)).toBeDefined();
     expect(screen.queryByText('Aucun run en cours.')).toBeNull();
+  });
+});
+
+describe('bruit technique', () => {
+  it('écarte un run clôturé par un redémarrage du serveur', () => {
+    seed({ runs: [run({ error: RUN_INTERRUPTED_BY_RESTART })] });
+    show();
+    /* Ce run n'appelle aucune décision : l'afficher noyait les vrais échecs à
+       chaque relance, et c'est ce que l'usage a montré en premier. */
+    expect(screen.queryByText(/Run en échec/)).toBeNull();
+    expect(screen.getByText(/Rien n'attend de décision/)).toBeDefined();
+  });
+
+  it('garde un vrai échec survenu dans la même fenêtre', () => {
+    seed({ runs: [run({ error: 'Budget de tokens dépassé' })] });
+    show();
+    expect(screen.getByText(/Budget de tokens dépassé/)).toBeDefined();
   });
 });

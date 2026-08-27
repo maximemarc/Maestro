@@ -357,7 +357,6 @@
     align-items: center;
   }
   .app-shell[data-rail='true'] .nav-label,
-  .app-shell[data-rail='true'] .brand-label,
   .app-shell[data-rail='true'] .footer-text {
     display: none;
   }
@@ -416,8 +415,7 @@
       padding-left: var(--space-3);
       padding-right: var(--space-3);
     }
-    .app-shell[data-rail='true'] .nav-label,
-    .app-shell[data-rail='true'] .brand-label {
+    .app-shell[data-rail='true'] .nav-label {
       display: inline;
     }
     .app-shell[data-rail='true'] .nav-link {

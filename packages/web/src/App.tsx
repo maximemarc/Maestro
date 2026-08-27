@@ -303,7 +303,6 @@ export default function App() {
             <span className="brand-mark">
               <Faders size={20} />
             </span>
-            <span className="brand-label">Maestro</span>
             <span
               className={`link-state${connected ? '' : ' off'}`}
               role="status"

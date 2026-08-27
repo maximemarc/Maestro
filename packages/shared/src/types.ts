@@ -210,6 +210,18 @@ export interface Approval {
 // Kanban
 // ---------------------------------------------------------------------------
 
+/**
+ * Motif d'échec des runs clôturés au démarrage du serveur.
+ *
+ * Un run laissé « actif » par un arrêt brutal est marqué en échec au démarrage
+ * suivant. Ce n'est pas une défaillance de l'agent, et surtout ce n'est pas une
+ * demande adressée à l'humain : l'accueil s'en sert pour écarter ces runs de la
+ * file d'arbitrage. La constante est partagée précisément pour que le message
+ * produit par le serveur et le filtre appliqué par l'interface ne puissent pas
+ * diverger.
+ */
+export const RUN_INTERRUPTED_BY_RESTART = 'Interrompu par un redémarrage du serveur';
+
 export const KANBAN_COLUMNS = ['backlog', 'running', 'review', 'done'] as const;
 export type KanbanColumn = (typeof KANBAN_COLUMNS)[number];
 
