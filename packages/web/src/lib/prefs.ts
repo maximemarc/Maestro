@@ -35,3 +35,20 @@ export async function requestApprovalNotifications(): Promise<boolean> {
 export function canNotify(): boolean {
   return 'Notification' in window && Notification.permission === 'granted';
 }
+
+const KANBAN_FOCUS = 'maestro:kanban-focus';
+
+/**
+ * Mode focus du Kanban.
+ *
+ * Persisté parce que c'est une habitude de travail, pas un état de session :
+ * qui arbitre son tableau en plein écran veut le retrouver ainsi demain. La
+ * préférence reste locale au navigateur, comme le reste de ce module.
+ */
+export function kanbanFocusEnabled(): boolean {
+  return localStorage.getItem(KANBAN_FOCUS) === '1';
+}
+
+export function setKanbanFocus(enabled: boolean): void {
+  localStorage.setItem(KANBAN_FOCUS, enabled ? '1' : '0');
+}

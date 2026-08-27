@@ -2188,40 +2188,111 @@
   }
 }
 
-/* ---------------------------------------------------------------------------
-   Modifications d'un run : liste de fichiers et diff
-   ---------------------------------------------------------------------------
-   Les couleurs reprennent les jetons de succès et de danger déjà définis plutôt
-   que le vert et le rouge canoniques de git : deux palettes dans la même
-   interface se remarquent, et celle-ci passe déjà les contrastes. */
+@layer components {
+  /* ---------------------------------------------------------------------------
+     Modifications d'un run : liste de fichiers et diff
+     ---------------------------------------------------------------------------
+     Les couleurs reprennent les jetons de succès et de danger déjà définis plutôt
+     que le vert et le rouge canoniques de git : deux palettes dans la même
+     interface se remarquent, et celle-ci passe déjà les contrastes. */
 
-.change-list {
-  list-style: none;
-  margin: var(--space-2) 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
-}
+  .change-list {
+    list-style: none;
+    margin: var(--space-2) 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
 
-.diff-view {
-  margin-top: var(--space-3);
-  line-height: 1.45;
-}
+  .diff-view {
+    margin-top: var(--space-3);
+    line-height: 1.45;
+  }
 
-.diff-add {
-  color: var(--ok);
-}
+  .diff-add {
+    color: var(--ok);
+  }
 
-.diff-del {
-  color: var(--danger);
-}
+  .diff-del {
+    color: var(--danger);
+  }
 
-.diff-hunk {
-  color: var(--accent);
-  opacity: 0.85;
-}
+  .diff-hunk {
+    color: var(--accent);
+    opacity: 0.85;
+  }
 
-.diff-file {
-  color: var(--text-faint);
+  .diff-file {
+    color: var(--text-faint);
+  }
+
+  /* ---------------------------------------------------------------------------
+     Kanban : mode focus et onglets de colonnes
+     ---------------------------------------------------------------------------
+     Le mode focus retire la navigation et la barre haute pour rendre la largeur
+     au tableau. Le masquage vit ici, piloté par une classe posée sur <body> par
+     la page : le shell n'a ainsi rien à connaître du Kanban. */
+
+  body.kanban-focus .sidebar,
+  body.kanban-focus .topbar,
+  body.kanban-focus .nav-scrim {
+    display: none;
+  }
+
+  .kanban-tabs {
+    display: flex;
+    gap: var(--space-1);
+    margin-bottom: var(--space-4);
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto;
+  }
+
+  .kanban-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-muted);
+    font: inherit;
+    cursor: pointer;
+    white-space: nowrap;
+    /* Le soulignement de l'onglet actif est la seule transition ici : signaler un
+       changement d'onglet est une rétroaction, pas une décoration. */
+    transition:
+      color var(--dur-fast),
+      border-color var(--dur-fast);
+  }
+
+  .kanban-tab:hover {
+    color: var(--text);
+  }
+
+  .kanban-tab.active {
+    color: var(--text);
+    border-bottom-color: var(--accent);
+  }
+
+  .kanban-tab .count {
+    padding: 0 var(--space-2);
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* En focus, une seule colonne est montée : la grille à quatre pistes n'a plus
+     de sens, la colonne prend la largeur disponible. */
+  .kanban.focus {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .kanban-tab {
+      transition: none;
+    }
+  }
 }

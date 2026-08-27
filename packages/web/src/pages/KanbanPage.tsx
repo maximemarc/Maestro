@@ -3,12 +3,13 @@
  * Les cartes sont poussées en temps réel par le WebSocket (task.*) : aucune
  * relecture de collection après mutation.
  */
-import { useMemo, useState, type DragEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type DragEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { Kanban, Play, Plus } from '@phosphor-icons/react';
+import { ArrowsIn, ArrowsOut, Kanban, Play, Plus } from '@phosphor-icons/react';
 import { KANBAN_COLUMNS, type KanbanColumn, type KanbanTask } from '@maestro/shared';
 import { api } from '../lib/api';
 import { COLUMN_LABELS } from '../lib/format';
+import { kanbanFocusEnabled, setKanbanFocus } from '../lib/prefs';
 import { useStore } from '../lib/store';
 import {
   AgentChip,
@@ -323,6 +324,45 @@ export default function KanbanPage() {
   const [overColumn, setOverColumn] = useState<KanbanColumn | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  /*
+   * Mode focus : le tableau seul, sans navigation ni barre haute.
+   *
+   * Arbitrer un tableau se fait par rafales, et le chrome de l'application n'y
+   * sert alors à rien tout en mangeant la largeur utile. Or quatre colonnes de
+   * cartes sont exactement ce qui souffre le plus d'une largeur amputée.
+   */
+  const [focus, setFocus] = useState(kanbanFocusEnabled);
+  /* En focus, une colonne à la fois : c'est ce qui donne au tri son rythme, et
+     ce qui rend le tableau utilisable sur un écran étroit. */
+  const [activeColumn, setActiveColumn] = useState<KanbanColumn>('backlog');
+
+  const toggleFocus = useCallback((next: boolean) => {
+    setFocus(next);
+    setKanbanFocus(next);
+  }, []);
+
+  /*
+   * Le masquage du chrome passe par une classe sur <body> plutôt que par un
+   * état partagé avec le shell : le nettoyage au démontage rend alors le chrome
+   * automatiquement à toute navigation sortante, sans qu'aucune autre page
+   * n'ait à s'en soucier.
+   */
+  useEffect(() => {
+    if (!focus) return;
+    document.body.classList.add('kanban-focus');
+    return () => document.body.classList.remove('kanban-focus');
+  }, [focus]);
+
+  // Échap quitte le focus : geste attendu de tout mode plein écran.
+  useEffect(() => {
+    if (!focus) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.code === 'Escape') toggleFocus(false);
+    };
+    window.addEventListener('keydown', onEscape);
+    return () => window.removeEventListener('keydown', onEscape);
+  }, [focus, toggleFocus]);
+
   const byColumn = useMemo(() => {
     const map = new Map<KanbanColumn, KanbanTask[]>();
     for (const col of KANBAN_COLUMNS) map.set(col, []);
@@ -376,6 +416,15 @@ export default function KanbanPage() {
           <kbd>→</kbd> déplace la carte focalisée.
         </span>
         <span className="spacer" />
+        <button
+          className={`btn sm${focus ? ' primary' : ' ghost'}`}
+          onClick={() => toggleFocus(!focus)}
+          aria-pressed={focus}
+          title={focus ? 'Quitter le mode focus (Échap)' : 'Afficher le tableau seul'}
+        >
+          {focus ? <ArrowsIn /> : <ArrowsOut />}
+          {focus ? 'Quitter le focus' : 'Mode focus'}
+        </button>
         <button className="btn primary" onClick={() => setCreating(true)}>
           <Plus />
           Nouvelle carte
@@ -396,98 +445,155 @@ export default function KanbanPage() {
           </button>
         </EmptyState>
       ) : (
-        <div className="kanban">
-          {KANBAN_COLUMNS.map((col) => {
-            const colTasks = byColumn.get(col) ?? [];
-            return (
-              <div
-                key={col}
-                className={`kanban-col${overColumn === col ? ' drag-over' : ''}`}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  setOverColumn(col);
-                }}
-                onDragLeave={(e) => {
-                  if (e.currentTarget === e.target) setOverColumn(null);
-                }}
-                onDrop={(e) => void onDrop(e, col)}
-              >
-                <div className="kanban-col-header">
-                  {COLUMN_LABELS[col] ?? col}
-                  <span className="count">{colTasks.length}</span>
-                </div>
-                {colTasks.map((task) => {
-                  const agent = task.agentId
-                    ? (agents.find((a) => a.id === task.agentId) ?? null)
-                    : null;
-                  const run = task.runId ? (runs.find((r) => r.id === task.runId) ?? null) : null;
-                  return (
-                    <div
-                      key={task.id}
-                      className={`kanban-card${dragId === task.id ? ' dragging' : ''}`}
-                      draggable
-                      onDragStart={(e) => {
-                        e.dataTransfer.setData('text/plain', task.id);
-                        e.dataTransfer.effectAllowed = 'move';
-                        setDragId(task.id);
-                      }}
-                      onDragEnd={() => {
-                        setDragId(null);
-                        setOverColumn(null);
-                      }}
-                      onClick={() => setEditingId(task.id)}
-                      /* Le glisser-déposer est à la souris. Le clavier passe par
+        <>
+          {/*
+            Onglets de colonnes, en focus uniquement.
+            En vue normale les quatre colonnes tiennent côte à côte et les
+            onglets seraient un détour ; en focus, ils sont la façon de cibler
+            une colonne. Vrai motif ARIA d'onglets : les flèches naviguent, la
+            tabulation entre et sort du groupe d'un seul coup.
+          */}
+          {focus && (
+            <div className="kanban-tabs" role="tablist" aria-label="Colonnes du tableau">
+              {KANBAN_COLUMNS.map((col, index) => {
+                const selected = activeColumn === col;
+                return (
+                  <button
+                    key={col}
+                    role="tab"
+                    id={`kanban-tab-${col}`}
+                    aria-selected={selected}
+                    aria-controls={`kanban-panel-${col}`}
+                    tabIndex={selected ? 0 : -1}
+                    className={`kanban-tab${selected ? ' active' : ''}`}
+                    onClick={() => setActiveColumn(col)}
+                    onKeyDown={(event) => {
+                      const offset =
+                        event.code === 'ArrowRight' ? 1 : event.code === 'ArrowLeft' ? -1 : 0;
+                      if (offset === 0) return;
+                      event.preventDefault();
+                      // Rotation : depuis la dernière colonne, la flèche droite
+                      // revient à la première, comme dans tout jeu d'onglets.
+                      const next =
+                        KANBAN_COLUMNS[
+                          (index + offset + KANBAN_COLUMNS.length) % KANBAN_COLUMNS.length
+                        ]!;
+                      setActiveColumn(next);
+                      document.getElementById(`kanban-tab-${next}`)?.focus();
+                    }}
+                  >
+                    {COLUMN_LABELS[col] ?? col}
+                    <span className="count">{(byColumn.get(col) ?? []).length}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          <div className={`kanban${focus ? ' focus' : ''}`}>
+            {KANBAN_COLUMNS.map((col) => {
+              const colTasks = byColumn.get(col) ?? [];
+              // En focus, les colonnes non sélectionnées sortent du DOM : garder
+              // trois panneaux masqués ferait porter au lecteur d'écran un
+              // tableau qui n'est pas à l'écran.
+              if (focus && col !== activeColumn) return null;
+              return (
+                <div
+                  key={col}
+                  {...(focus
+                    ? {
+                        role: 'tabpanel',
+                        id: `kanban-panel-${col}`,
+                        'aria-labelledby': `kanban-tab-${col}`,
+                      }
+                    : {})}
+                  className={`kanban-col${overColumn === col ? ' drag-over' : ''}`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setOverColumn(col);
+                  }}
+                  onDragLeave={(e) => {
+                    if (e.currentTarget === e.target) setOverColumn(null);
+                  }}
+                  onDrop={(e) => void onDrop(e, col)}
+                >
+                  <div className="kanban-col-header">
+                    {COLUMN_LABELS[col] ?? col}
+                    <span className="count">{colTasks.length}</span>
+                  </div>
+                  {colTasks.map((task) => {
+                    const agent = task.agentId
+                      ? (agents.find((a) => a.id === task.agentId) ?? null)
+                      : null;
+                    const run = task.runId ? (runs.find((r) => r.id === task.runId) ?? null) : null;
+                    return (
+                      <div
+                        key={task.id}
+                        className={`kanban-card${dragId === task.id ? ' dragging' : ''}`}
+                        draggable
+                        onDragStart={(e) => {
+                          e.dataTransfer.setData('text/plain', task.id);
+                          e.dataTransfer.effectAllowed = 'move';
+                          setDragId(task.id);
+                        }}
+                        onDragEnd={() => {
+                          setDragId(null);
+                          setOverColumn(null);
+                        }}
+                        onClick={() => setEditingId(task.id)}
+                        /* Le glisser-déposer est à la souris. Le clavier passe par
                          la modale, qui contient le sélecteur de colonne : sans
                          cela, une carte est inatteignable sans souris. */
-                      role="button"
-                      tabIndex={0}
-                      onKeyDown={(e) => {
-                        if (e.code === 'Enter' || e.code === 'Space') {
-                          e.preventDefault();
-                          setEditingId(task.id);
-                          return;
-                        }
-                        /* Ctrl plutôt que les flèches seules : les flèches
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => {
+                          if (e.code === 'Enter' || e.code === 'Space') {
+                            e.preventDefault();
+                            setEditingId(task.id);
+                            return;
+                          }
+                          /* Ctrl plutôt que les flèches seules : les flèches
                            doivent continuer à faire défiler la colonne. */
-                        if (!e.ctrlKey && !e.metaKey) return;
-                        if (e.code === 'ArrowRight') {
-                          e.preventDefault();
-                          void moveToColumn(task, 1);
-                        } else if (e.code === 'ArrowLeft') {
-                          e.preventDefault();
-                          void moveToColumn(task, -1);
-                        }
-                      }}
-                    >
-                      <div className="title">{task.title}</div>
-                      <div className="meta">
-                        <PriorityBadge priority={task.priority} />
-                        {task.labels.map((label) => (
-                          <span key={label} className="badge violet">
-                            {label}
-                          </span>
-                        ))}
-                        {task.agentId && <AgentChip agent={agent} />}
-                        {task.runId && (
-                          <>
-                            {run && <span className={`status-dot ${run.status}`} />}
-                            <Link
-                              to={`/runs/${task.runId}`}
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-sm"
-                            >
-                              voir
-                            </Link>
-                          </>
-                        )}
+                          if (!e.ctrlKey && !e.metaKey) return;
+                          if (e.code === 'ArrowRight') {
+                            e.preventDefault();
+                            void moveToColumn(task, 1);
+                          } else if (e.code === 'ArrowLeft') {
+                            e.preventDefault();
+                            void moveToColumn(task, -1);
+                          }
+                        }}
+                      >
+                        <div className="title">{task.title}</div>
+                        <div className="meta">
+                          <PriorityBadge priority={task.priority} />
+                          {task.labels.map((label) => (
+                            <span key={label} className="badge violet">
+                              {label}
+                            </span>
+                          ))}
+                          {task.agentId && <AgentChip agent={agent} />}
+                          {task.runId && (
+                            <>
+                              {run && <span className={`status-dot ${run.status}`} />}
+                              <Link
+                                to={`/runs/${task.runId}`}
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-sm"
+                              >
+                                voir
+                              </Link>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
-              </div>
-            );
-          })}
-        </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {creating && <CreateTaskModal onClose={() => setCreating(false)} />}
