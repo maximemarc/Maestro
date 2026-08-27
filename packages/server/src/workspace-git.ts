@@ -31,11 +31,26 @@ export const DIFF_MAX_CHARS = 200_000;
 const MAX_BUFFER = 8 * 1024 * 1024;
 /** Une commande git qui dépasse ce délai est considérée comme bloquée. */
 const TIMEOUT_MS = 15_000;
+/** Nombre de fichiers neufs dont le contenu est ajouté au diff. */
+const UNTRACKED_DIFF_MAX_FILES = 25;
+/** Au-delà, un fichier neuf n'est que listé : son contenu noierait le diff. */
+const UNTRACKED_DIFF_MAX_BYTES = 100_000;
 
 export class WorkspaceGitError extends Error {}
 
-/** Exécute git sans passer par un shell : aucune interpolation possible. */
-async function git(dir: string, args: string[]): Promise<string> {
+/**
+ * Exécute git sans passer par un shell : aucune interpolation possible.
+ *
+ * `tolerateExitCode` existe pour `diff --no-index`, qui rend 1 dès qu'il trouve
+ * une différence — c'est-à-dire toujours, dans notre usage — en écrivant le
+ * diff sur la sortie standard. Sans cette porte, sa sortie serait jetée avec
+ * l'exception.
+ */
+async function git(
+  dir: string,
+  args: string[],
+  options: { tolerateExitCode?: number } = {},
+): Promise<string> {
   try {
     const { stdout } = await run('git', ['-C', dir, ...args], {
       maxBuffer: MAX_BUFFER,
@@ -44,6 +59,17 @@ async function git(dir: string, args: string[]): Promise<string> {
     });
     return stdout;
   } catch (err) {
+    if (
+      options.tolerateExitCode !== undefined &&
+      err !== null &&
+      typeof err === 'object' &&
+      'code' in err &&
+      err.code === options.tolerateExitCode &&
+      'stdout' in err &&
+      typeof err.stdout === 'string'
+    ) {
+      return err.stdout;
+    }
     const message =
       err instanceof Error && 'stderr' in err && typeof err.stderr === 'string' && err.stderr.trim()
         ? err.stderr.trim()
@@ -141,6 +167,55 @@ async function numstat(dir: string, args: string[]): Promise<Map<string, [number
 }
 
 /**
+ * Diff des fichiers neufs, que `git diff HEAD` ignore par construction.
+ *
+ * C'est le cas le plus fréquent pour un agent — il écrit du neuf plus souvent
+ * qu'il ne modifie —, donc l'omettre viderait le diff précisément quand il
+ * compte. Constaté en essayant sur un vrai dépôt.
+ *
+ * `--no-index` compare deux chemins hors dépôt : aucun ajout à l'index, donc
+ * aucun effet de bord sur le travail en cours de l'utilisateur. C'est ce qui
+ * disqualifie l'astuce habituelle du `git add --intent-to-add`.
+ */
+async function untrackedDiff(dir: string, paths: string[]): Promise<string> {
+  const { statSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const parts: string[] = [];
+
+  for (const path of paths.slice(0, UNTRACKED_DIFF_MAX_FILES)) {
+    let size: number;
+    try {
+      const stat = statSync(join(dir, path));
+      if (!stat.isFile()) continue;
+      size = stat.size;
+    } catch {
+      continue; // supprimé entre-temps
+    }
+    if (size > UNTRACKED_DIFF_MAX_BYTES) {
+      parts.push(
+        `--- /dev/null\n+++ b/${path}\n@@ fichier neuf de ${Math.round(size / 1024)} ko, contenu non affiché @@`,
+      );
+      continue;
+    }
+    try {
+      const out = await git(dir, ['diff', '--no-index', '--no-color', '--', '/dev/null', path], {
+        tolerateExitCode: 1,
+      });
+      if (out.trim()) parts.push(out);
+    } catch {
+      // Fichier illisible ou binaire refusé : il reste listé plus haut, sans son contenu.
+    }
+  }
+
+  if (paths.length > UNTRACKED_DIFF_MAX_FILES) {
+    parts.push(
+      `@@ ${paths.length - UNTRACKED_DIFF_MAX_FILES} autre(s) fichier(s) neuf(s) non affiché(s) @@`,
+    );
+  }
+  return parts.join('\n');
+}
+
+/**
  * État des modifications par rapport au point de référence.
  *
  * Le diff est calculé contre `HEAD` et non contre `baseSha` : si un commit a eu
@@ -190,6 +265,13 @@ export async function changes(dir: string, base: GitSnapshot | null): Promise<Wo
     // Dépôt sans commit : il n'y a rien à comparer, seuls les non-suivis existent.
     diff = '';
   }
+
+  const untracked = files.filter((f) => f.status === 'untracked').map((f) => f.path);
+  if (untracked.length > 0) {
+    const extra = await untrackedDiff(dir, untracked);
+    if (extra) diff = diff ? `${diff}\n${extra}` : extra;
+  }
+
   const diffTruncated = diff.length > DIFF_MAX_CHARS;
 
   return {

@@ -213,3 +213,32 @@ describe('nom de branche dérivé du run', () => {
     expect(branchNameFor('!!! ???', 'run_12345678')).toBe('maestro/run-run_1234');
   });
 });
+
+describe('diff des fichiers neufs', () => {
+  it('montre le contenu d’un fichier neuf, que git diff HEAD ignore', async () => {
+    const base = await snapshot(dir);
+    write('neuf.txt', 'première ligne\ndeuxième ligne\n');
+    const result = await changes(dir, base);
+    expect(result.diff).toContain('neuf.txt');
+    expect(result.diff).toContain('+première ligne');
+  });
+
+  it('liste un fichier neuf volumineux sans en afficher le contenu', async () => {
+    const base = await snapshot(dir);
+    write('gros.txt', 'x'.repeat(150_000));
+    const result = await changes(dir, base);
+    expect(result.diff).toContain('gros.txt');
+    expect(result.diff).toContain('contenu non affiché');
+    expect(result.diff).not.toContain('xxxxxxxxxx');
+  });
+
+  it('combine modifications suivies et fichiers neufs', async () => {
+    const base = await snapshot(dir);
+    write('depart.txt', 'ligne un\nligne deux\n');
+    write('neuf.txt', 'contenu neuf\n');
+    const result = await changes(dir, base);
+    expect(result.diff).toContain('+ligne deux');
+    expect(result.diff).toContain('+contenu neuf');
+    expect(result.files).toHaveLength(2);
+  });
+});
