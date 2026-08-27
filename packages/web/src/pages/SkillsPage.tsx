@@ -340,6 +340,10 @@ export default function SkillsPage() {
           Nouveau skill
         </button>
       </div>
+      <p className="page-lede">
+        Des consignes réutilisables, en quatre portées : intégrées, Claude Code, globales, par
+        agent.
+      </p>
 
       {pageError && <ErrorText>{pageError}</ErrorText>}
 

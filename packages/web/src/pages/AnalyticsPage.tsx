@@ -155,6 +155,10 @@ export default function AnalyticsPage() {
           Actualiser
         </button>
       </div>
+      <p className="page-lede">
+        Tokens et coûts par jour, par agent et par modèle. Les chiffres viennent des runs eux-mêmes,
+        sans proxy intermédiaire.
+      </p>
 
       {error && (
         <div className="error-box mb-4" role="alert">

@@ -139,6 +139,10 @@ export default function SettingsPage() {
       <div className="page-header">
         <h1>Paramètres</h1>
       </div>
+      <p className="page-lede">
+        Concurrence des runs, délai d'expiration des approbations, profondeur de délégation,
+        notifications.
+      </p>
 
       <div className="col panel-wide">
         {/* --- Orchestrateur ------------------------------------------------ */}

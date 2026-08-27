@@ -474,6 +474,9 @@ export default function PipelinesPage() {
           Nouveau pipeline
         </button>
       </div>
+      <p className="page-lede">
+        Une chaîne d'agents où chaque étape reçoit la sortie de la précédente.
+      </p>
 
       {actionError && <ErrorText>{actionError}</ErrorText>}
 

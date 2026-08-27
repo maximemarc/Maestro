@@ -411,10 +411,6 @@ export default function KanbanPage() {
     <div className="page">
       <div className="page-header">
         <h1>Kanban</h1>
-        <span className="text-muted text-sm">
-          Les agents avancent leurs cartes ; tu arbitres. Au clavier : <kbd>Ctrl</kbd> <kbd>←</kbd>{' '}
-          <kbd>→</kbd> déplace la carte focalisée.
-        </span>
         <span className="spacer" />
         <button
           className={`btn sm${focus ? ' primary' : ' ghost'}`}
@@ -430,6 +426,10 @@ export default function KanbanPage() {
           Nouvelle carte
         </button>
       </div>
+      <p className="page-lede">
+        Les agents avancent leurs cartes ; tu arbitres. Au clavier : <kbd>Ctrl</kbd> <kbd>←</kbd>{' '}
+        <kbd>→</kbd> déplace la carte focalisée.
+      </p>
 
       {error && <ErrorText>{error}</ErrorText>}
 

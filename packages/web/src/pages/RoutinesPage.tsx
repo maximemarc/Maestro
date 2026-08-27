@@ -164,6 +164,7 @@ export default function RoutinesPage() {
           Nouvelle routine
         </button>
       </div>
+      <p className="page-lede">Un agent, une skill et un prompt, déclenchés à l'heure dite.</p>
 
       {pageError && <ErrorText>{pageError}</ErrorText>}
 

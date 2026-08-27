@@ -160,6 +160,10 @@ export default function RadarPage() {
           Balayer maintenant
         </button>
       </div>
+      <p className="page-lede">
+        Les sessions d'agents de code actives sur cette machine, qu'elles soient pilotées par
+        Maestro ou lancées à la main dans un terminal.
+      </p>
 
       {error && <ErrorText>{error}</ErrorText>}
 

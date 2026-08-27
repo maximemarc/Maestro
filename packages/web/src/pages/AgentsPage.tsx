@@ -261,6 +261,10 @@ export default function AgentsPage() {
           Nouvel agent
         </button>
       </div>
+      <p className="page-lede">
+        Chaque agent porte son modèle, son contexte et ses garde-fous. Cloner un agent existant
+        évite de tout reconfigurer.
+      </p>
 
       {pageError && <ErrorText>{pageError}</ErrorText>}
 

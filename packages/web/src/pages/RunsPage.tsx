@@ -283,6 +283,9 @@ export default function RunsPage() {
           Nouveau run
         </button>
       </div>
+      <p className="page-lede">
+        Toutes les exécutions, en cours et passées, avec leur coût et leur origine.
+      </p>
 
       <div className="filter-bar mb-3">
         <select
