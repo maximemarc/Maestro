@@ -26,13 +26,18 @@ export function fmtDateTime(iso: string | null | undefined): string {
   });
 }
 
-export function fmtDuration(startIso: string | null, endIso: string | null): string {
-  if (!startIso) return ABSENT;
-  const end = endIso ? new Date(endIso).getTime() : Date.now();
-  const sec = Math.max(0, Math.floor((end - new Date(startIso).getTime()) / 1000));
+/** Durée en millisecondes, au même format qu'une durée de run. */
+export function fmtDurationMs(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000));
   if (sec < 60) return `${sec}s`;
   if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
   return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
+
+export function fmtDuration(startIso: string | null, endIso: string | null): string {
+  if (!startIso) return ABSENT;
+  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  return fmtDurationMs(end - new Date(startIso).getTime());
 }
 
 export function fmtUptime(sec: number): string {

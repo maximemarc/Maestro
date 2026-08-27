@@ -6,9 +6,10 @@
  * échecs vieux d'une semaine cesse d'être lu, et un accueil qui oublie une
  * approbation en attente laisse un agent suspendu sans que personne le sache.
  */
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { api } from '../lib/api';
 import {
   RUN_INTERRUPTED_BY_RESTART,
   type AgentConfig,
@@ -33,7 +34,13 @@ function run(overrides: Partial<Run>): Run {
     prompt: 'Rapprocher les écritures bancaires',
     status: 'failed',
     error: 'Budget de tokens dépassé',
+    createdAt: new Date().toISOString(),
+    startedAt: new Date(Date.now() - 30_000).toISOString(),
     endedAt: new Date().toISOString(),
+    costUsd: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
     ...overrides,
   } as unknown as Run;
 }
@@ -57,7 +64,16 @@ function show() {
   );
 }
 
-afterEach(cleanup);
+/* La tendance est le seul appel réseau de la page. Par défaut il ne rend rien :
+   chaque test qui s'y intéresse fournit sa propre série. */
+beforeEach(() => {
+  vi.spyOn(api, 'tokensBy').mockResolvedValue([]);
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('file d’arbitrage', () => {
   it('annonce qu’il n’y a rien à décider quand tout est traité', () => {
@@ -158,5 +174,65 @@ describe('bruit technique', () => {
     seed({ runs: [run({ error: 'Budget de tokens dépassé' })] });
     show();
     expect(screen.getByText(/Budget de tokens dépassé/)).toBeDefined();
+  });
+});
+
+describe('chiffres de la journée', () => {
+  it('compte les réussites, les échecs et le taux', () => {
+    seed({
+      runs: [
+        run({ id: 'r1', status: 'succeeded', costUsd: 0.2 }),
+        run({ id: 'r2', status: 'succeeded', costUsd: 0.1 }),
+        run({ id: 'r3', status: 'failed', error: 'Timeout', costUsd: 0.05 }),
+      ],
+    });
+    show();
+    expect(screen.getByText('67 % de réussite')).toBeDefined();
+    expect(screen.getByText(/1 échoué/)).toBeDefined();
+  });
+
+  it("n'impute pas au taux de réussite un run clôturé par un redémarrage", () => {
+    seed({
+      runs: [
+        run({ id: 'r1', status: 'succeeded', costUsd: 0.2 }),
+        run({ id: 'r2', status: 'failed', error: RUN_INTERRUPTED_BY_RESTART }),
+      ],
+    });
+    show();
+    // Deux runs du jour, un seul réussi, mais aucun échec imputable.
+    expect(screen.queryByText(/échoué/)).toBeNull();
+  });
+
+  it('reste lisible sans aucun run du jour', () => {
+    seed({});
+    show();
+    // Ni division par zéro, ni « NaN % » : les cases sans donnée le disent.
+    expect(screen.queryByText(/NaN/)).toBeNull();
+    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+  });
+
+  it('signale un coût qui dépasse la moyenne de la semaine', async () => {
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    vi.spyOn(api, 'tokensBy').mockResolvedValue([
+      {
+        bucket: yesterday,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        costUsd: 1,
+        runs: 2,
+      },
+    ]);
+    seed({ runs: [run({ id: 'r1', status: 'succeeded', costUsd: 2 })] });
+    show();
+    await waitFor(() => expect(screen.getByText(/100 % vs moyenne 7 j/)).toBeDefined());
+  });
+
+  it("n'empêche pas l'affichage quand la tendance est indisponible", async () => {
+    vi.spyOn(api, 'tokensBy').mockRejectedValue(new Error('hors ligne'));
+    seed({ runs: [run({ id: 'r1', status: 'succeeded', costUsd: 0.5 })] });
+    show();
+    await waitFor(() => expect(screen.getByText('100 % de réussite')).toBeDefined());
+    expect(screen.queryByText(/vs moyenne/)).toBeNull();
   });
 });

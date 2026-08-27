@@ -10,11 +10,20 @@ export function nowIso(): string {
 }
 
 /** Date locale YYYY-MM-DD (regroupements journaliers). */
-export function todayKey(): string {
+/**
+ * Instant du début de la journée courante, en ISO UTC.
+ *
+ * Sert de borne aux totaux « du jour ». La version précédente fabriquait une
+ * date au format local (`2026-08-27`) et la comparait à `created_at`, qui est
+ * stocké en UTC : en Europe/Paris, les runs lancés entre minuit et deux heures
+ * du matin portaient un horodatage UTC de la veille et disparaissaient donc du
+ * total de la journée. Comparer des instants, et non des préfixes de chaîne,
+ * supprime la classe entière de ce défaut.
+ */
+export function startOfTodayIso(): string {
   const d = new Date();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${mm}-${dd}`;
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString();
 }
 
 export function truncate(text: string, max: number): string {

@@ -2369,4 +2369,36 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
+  /* Écart et précision sous un chiffre clé : la valeur se lit d'abord, sa mise
+     en perspective ensuite. D'où une taille et un contraste inférieurs, jamais
+     une couleur vive qui ferait concurrence au chiffre. */
+  .home-delta {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin: 2px 0 0;
+    color: var(--text-faint);
+    font-size: var(--text-xs);
+  }
+  /* Un coût qui monte n'est pas une erreur, seulement un fait à remarquer :
+     l'accent suffit, le rouge serait une alarme injustifiée. */
+  .home-delta.up {
+    color: var(--warn);
+  }
+  .home-delta.down {
+    color: var(--ok);
+  }
+
+  .home-fail {
+    color: var(--danger);
+    font-size: var(--text-sm);
+  }
+
+  .home-subhead {
+    margin: var(--space-4) 0 0;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: none;
+  }
 }

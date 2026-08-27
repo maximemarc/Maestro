@@ -5,7 +5,7 @@ import type { MetricsSnapshot } from '@maestro/shared';
 import type { Bus } from './bus.ts';
 import type { Store } from './db.ts';
 import type { RunEngine } from './runs.ts';
-import { nowIso, todayKey } from './util.ts';
+import { nowIso, startOfTodayIso } from './util.ts';
 
 export class Metrics {
   private startedAtMs = Date.now();
@@ -19,7 +19,7 @@ export class Metrics {
   ) {}
 
   snapshot(): MetricsSnapshot {
-    const today = this.store.todayTotals(todayKey());
+    const today = this.store.todayTotals(startOfTodayIso());
     return {
       ts: nowIso(),
       uptimeSec: Math.floor((Date.now() - this.startedAtMs) / 1000),
