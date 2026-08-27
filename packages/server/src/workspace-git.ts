@@ -1,0 +1,316 @@
+/**
+ * Lecture et livraison du travail produit dans le répertoire d'un agent.
+ *
+ * Un orchestrateur d'agents de code qui ne montre pas ce que ses agents ont
+ * changé demande une confiance aveugle. Ce module comble ce vide : il prend un
+ * point de référence au démarrage d'un run, et sait dire à l'arrivée quels
+ * fichiers ont bougé, puis proposer un patch ou une branche.
+ *
+ * Trois partis pris, qui expliquent la forme du code :
+ *
+ * 1. **Le répertoire de l'agent n'est pas forcément un dépôt.** Par défaut,
+ *    Maestro fabrique un workspace qui ne contient que `CLAUDE.md` et
+ *    `MEMORY.md`. La fonctionnalité doit donc se désactiver proprement et le
+ *    dire, jamais échouer.
+ * 2. **On n'attribue pas à un run ce qu'il n'a pas fait.** Les fichiers déjà
+ *    modifiés au démarrage sont marqués comme tels : un humain qui édite en
+ *    parallèle ne doit pas voir son travail imputé à l'agent.
+ * 3. **Rien n'est écrit sans demande explicite.** Aucun commit automatique,
+ *    aucune branche existante réutilisée, et jamais de `push` — livrer sur un
+ *    remote est une décision humaine.
+ */
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import type { ChangeStatus, ChangedFile, CommitResult, WorkspaceChanges } from '@maestro/shared';
+
+const run = promisify(execFile);
+
+/** Au-delà, le diff est tronqué : un patch de plusieurs mégaoctets ne se lit pas. */
+export const DIFF_MAX_CHARS = 200_000;
+/** Garde-fou de mémoire sur la sortie de git, indépendant de la troncature d'affichage. */
+const MAX_BUFFER = 8 * 1024 * 1024;
+/** Une commande git qui dépasse ce délai est considérée comme bloquée. */
+const TIMEOUT_MS = 15_000;
+
+export class WorkspaceGitError extends Error {}
+
+/** Exécute git sans passer par un shell : aucune interpolation possible. */
+async function git(dir: string, args: string[]): Promise<string> {
+  try {
+    const { stdout } = await run('git', ['-C', dir, ...args], {
+      maxBuffer: MAX_BUFFER,
+      timeout: TIMEOUT_MS,
+      windowsHide: true,
+    });
+    return stdout;
+  } catch (err) {
+    const message =
+      err instanceof Error && 'stderr' in err && typeof err.stderr === 'string' && err.stderr.trim()
+        ? err.stderr.trim()
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    throw new WorkspaceGitError(message);
+  }
+}
+
+/** Le répertoire est-il la racine d'un dépôt utilisable ? */
+export async function isRepo(dir: string): Promise<boolean> {
+  try {
+    const out = await git(dir, ['rev-parse', '--is-inside-work-tree']);
+    return out.trim() === 'true';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Point de référence pris au démarrage d'un run.
+ *
+ * `dirty` est la clé de l'honnêteté du diff : sans cette liste, impossible de
+ * distinguer plus tard ce que l'agent a écrit de ce qui traînait déjà.
+ */
+export interface GitSnapshot {
+  head: string | null;
+  branch: string | null;
+  dirty: string[];
+}
+
+/** Fichiers modifiés au sens de `git status --porcelain`, chemins normalisés. */
+async function dirtyPaths(dir: string): Promise<string[]> {
+  const out = await git(dir, ['status', '--porcelain', '--untracked-files=all']);
+  return (
+    out
+      .split('\n')
+      .map((line) => line.slice(3).trim())
+      .filter(Boolean)
+      // Un renommage s'écrit « ancien -> nouveau » : les deux comptent comme sales.
+      .flatMap((path) => (path.includes(' -> ') ? path.split(' -> ') : [path]))
+      .map((path) => path.replace(/^"|"$/g, ''))
+  );
+}
+
+export async function snapshot(dir: string): Promise<GitSnapshot | null> {
+  if (!(await isRepo(dir))) return null;
+  /* Un dépôt fraîchement initialisé n'a pas de HEAD : ce n'est pas une erreur,
+     c'est l'état normal avant le premier commit. */
+  let head: string | null = null;
+  try {
+    head = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+  } catch {
+    head = null;
+  }
+  let branch: string | null = null;
+  try {
+    branch = (await git(dir, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    if (branch === 'HEAD') branch = null; // détaché
+  } catch {
+    branch = null;
+  }
+  return { head, branch, dirty: await dirtyPaths(dir) };
+}
+
+export type { ChangeStatus, ChangedFile, CommitResult, WorkspaceChanges };
+
+function statusOf(code: string, untracked: boolean): ChangeStatus {
+  if (untracked) return 'untracked';
+  if (code.includes('D')) return 'deleted';
+  if (code.includes('A')) return 'added';
+  if (code.includes('R')) return 'renamed';
+  return 'modified';
+}
+
+/**
+ * Compte les lignes ajoutées et retirées par fichier.
+ *
+ * `--numstat` est utilisé plutôt qu'un comptage maison sur le diff : c'est git
+ * qui décide ce qui est binaire (auquel cas il rend « - - »), et refaire ce
+ * jugement à la main se tromperait.
+ */
+async function numstat(dir: string, args: string[]): Promise<Map<string, [number, number]>> {
+  const out = await git(dir, ['diff', '--numstat', ...args]);
+  const map = new Map<string, [number, number]>();
+  for (const line of out.split('\n')) {
+    if (!line.trim()) continue;
+    const [add, del, ...rest] = line.split('\t');
+    const path = rest.join('\t');
+    if (!path) continue;
+    map.set(path, [Number(add) || 0, Number(del) || 0]);
+  }
+  return map;
+}
+
+/**
+ * État des modifications par rapport au point de référence.
+ *
+ * Le diff est calculé contre `HEAD` et non contre `baseSha` : si un commit a eu
+ * lieu pendant le run (un agent qui commite lui-même), le comparer au SHA de
+ * départ afficherait ses propres commits comme des modifications en attente.
+ * Le SHA de départ reste exposé pour que l'interface puisse signaler l'écart.
+ */
+export async function changes(dir: string, base: GitSnapshot | null): Promise<WorkspaceChanges> {
+  if (!(await isRepo(dir))) {
+    return {
+      available: false,
+      reason:
+        "Le répertoire de cet agent n'est pas un dépôt git : Maestro ne peut pas suivre les modifications.",
+      branch: null,
+      baseSha: base?.head ?? null,
+      files: [],
+      diff: '',
+      diffTruncated: false,
+    };
+  }
+
+  const preexisting = new Set(base?.dirty ?? []);
+  const statusOut = await git(dir, ['status', '--porcelain', '--untracked-files=all']);
+  const stats = await numstat(dir, ['HEAD']);
+
+  const files: ChangedFile[] = [];
+  for (const line of statusOut.split('\n')) {
+    if (!line.trim()) continue;
+    const code = line.slice(0, 2);
+    const raw = line.slice(3).trim().replace(/^"|"$/g, '');
+    const path = raw.includes(' -> ') ? (raw.split(' -> ')[1] ?? raw) : raw;
+    const untracked = code.trim() === '??';
+    const [additions, deletions] = stats.get(path) ?? [0, 0];
+    files.push({
+      path,
+      status: statusOf(code, untracked),
+      additions,
+      deletions,
+      preexisting: preexisting.has(path),
+    });
+  }
+
+  let diff = '';
+  try {
+    diff = await git(dir, ['diff', 'HEAD']);
+  } catch {
+    // Dépôt sans commit : il n'y a rien à comparer, seuls les non-suivis existent.
+    diff = '';
+  }
+  const diffTruncated = diff.length > DIFF_MAX_CHARS;
+
+  return {
+    available: true,
+    reason: null,
+    branch: (await snapshot(dir))?.branch ?? null,
+    baseSha: base?.head ?? null,
+    files: files.sort((a, b) => a.path.localeCompare(b.path)),
+    diff: diffTruncated ? `${diff.slice(0, DIFF_MAX_CHARS)}\n…(diff tronqué)` : diff,
+    diffTruncated,
+  };
+}
+
+/** Patch complet, prêt à `git apply`. Non tronqué : un patch amputé ne s'applique pas. */
+export async function patch(dir: string): Promise<string> {
+  if (!(await isRepo(dir))) throw new WorkspaceGitError("Ce répertoire n'est pas un dépôt git.");
+  /* `--binary` pour que les fichiers binaires survivent au transport, et
+     `--no-color` parce qu'un patch colorisé est inapplicable. */
+  return git(dir, ['diff', '--binary', '--no-color', 'HEAD']);
+}
+
+/**
+ * Une opération d'écriture est-elle sûre ici ?
+ *
+ * Commiter au milieu d'un merge ou d'un rebase interrompu laisserait le dépôt
+ * dans un état que l'utilisateur ne saurait pas défaire. Mieux vaut refuser et
+ * le dire.
+ */
+async function assertWritable(dir: string): Promise<void> {
+  const gitDir = (await git(dir, ['rev-parse', '--absolute-git-dir'])).trim();
+  const { existsSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const blockers: [string, string][] = [
+    ['MERGE_HEAD', 'une fusion est en cours'],
+    ['rebase-merge', 'un rebase est en cours'],
+    ['rebase-apply', 'un rebase ou un am est en cours'],
+    ['CHERRY_PICK_HEAD', 'un cherry-pick est en cours'],
+  ];
+  for (const [marker, label] of blockers) {
+    if (existsSync(join(gitDir, marker))) {
+      throw new WorkspaceGitError(
+        `Opération refusée : ${label} dans ce dépôt. Termine-la avant de livrer depuis Maestro.`,
+      );
+    }
+  }
+}
+
+/** Nom de branche valide au sens de git, et libre. */
+async function assertBranchAvailable(dir: string, branch: string): Promise<void> {
+  try {
+    await git(dir, ['check-ref-format', '--branch', branch]);
+  } catch {
+    throw new WorkspaceGitError(`Nom de branche invalide : ${branch}`);
+  }
+  try {
+    await git(dir, ['rev-parse', '--verify', `refs/heads/${branch}`]);
+  } catch {
+    return; // absente : c'est ce qu'on veut
+  }
+  throw new WorkspaceGitError(
+    `La branche ${branch} existe déjà. Maestro ne réécrit jamais une branche existante.`,
+  );
+}
+
+/**
+ * Crée une branche depuis l'état courant et y commite les modifications.
+ *
+ * Toujours une branche neuve, jamais la branche courante : le pire scénario
+ * serait qu'un commit produit par une machine atterrisse sur `main` sans que
+ * personne l'ait demandé.
+ */
+export async function commitToBranch(
+  dir: string,
+  options: { branch: string; message: string; paths?: string[] },
+): Promise<CommitResult> {
+  if (!(await isRepo(dir))) throw new WorkspaceGitError("Ce répertoire n'est pas un dépôt git.");
+  await assertWritable(dir);
+  await assertBranchAvailable(dir, options.branch);
+
+  const before = await dirtyPaths(dir);
+  if (before.length === 0) throw new WorkspaceGitError('Aucune modification à livrer.');
+
+  await git(dir, ['checkout', '-b', options.branch]);
+  try {
+    if (options.paths && options.paths.length > 0) {
+      await git(dir, ['add', '--', ...options.paths]);
+    } else {
+      await git(dir, ['add', '--all']);
+    }
+    /* `--no-verify` n'est pas utilisé : si le dépôt a un hook de pre-commit,
+       c'est qu'il a une raison, et un commit fabriqué par Maestro n'a aucun
+       privilège particulier. */
+    await git(dir, ['commit', '--message', options.message]);
+  } catch (err) {
+    // On ne laisse pas l'utilisateur sur une branche à moitié faite.
+    await git(dir, ['checkout', '-']).catch(() => undefined);
+    await git(dir, ['branch', '-D', options.branch]).catch(() => undefined);
+    throw err;
+  }
+
+  const sha = (await git(dir, ['rev-parse', 'HEAD'])).trim();
+  const count = (await git(dir, ['show', '--name-only', '--format=', 'HEAD']))
+    .split('\n')
+    .filter(Boolean).length;
+  return { branch: options.branch, sha, files: count };
+}
+
+/**
+ * Nom de branche dérivé d'un run.
+ *
+ * Le prompt sert de libellé parce que c'est ce dont l'humain se souvient ; le
+ * fragment d'identifiant garantit l'unicité quand le même prompt est rejoué.
+ */
+export function branchNameFor(prompt: string, runId: string): string {
+  const slug = prompt
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40)
+    .replace(/-+$/g, '');
+  return `maestro/${slug || 'run'}-${runId.slice(0, 8)}`;
+}

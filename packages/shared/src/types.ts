@@ -922,3 +922,42 @@ export interface RagGraph {
    */
   isolatedCount: number;
 }
+
+// ---------------------------------------------------------------------------
+// Modifications produites dans le répertoire d'un agent
+// ---------------------------------------------------------------------------
+
+export type ChangeStatus = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked';
+
+export interface ChangedFile {
+  path: string;
+  status: ChangeStatus;
+  additions: number;
+  deletions: number;
+  /**
+   * Vrai si le fichier était déjà modifié au démarrage du run.
+   *
+   * Distinction indispensable : imputer à un agent le travail en cours d'un
+   * humain rendrait le diff trompeur, et personne ne s'y fierait deux fois.
+   */
+  preexisting: boolean;
+}
+
+export interface WorkspaceChanges {
+  /** Faux quand le répertoire de l'agent n'est pas un dépôt git ; `reason` l'explique. */
+  available: boolean;
+  reason: string | null;
+  branch: string | null;
+  /** HEAD au démarrage du run, pour signaler un commit survenu pendant. */
+  baseSha: string | null;
+  files: ChangedFile[];
+  diff: string;
+  diffTruncated: boolean;
+}
+
+/** Résultat d'une livraison sur une branche neuve. */
+export interface CommitResult {
+  branch: string;
+  sha: string;
+  files: number;
+}

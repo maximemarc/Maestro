@@ -26,6 +26,13 @@ import { RagError, type RagService } from './rag.ts';
 import type { SessionRadar } from './radar.ts';
 import type { SkillRegistry } from './skills.ts';
 import type { TmuxBridge } from './tmux.ts';
+import {
+  WorkspaceGitError,
+  branchNameFor,
+  changes as gitChanges,
+  commitToBranch,
+  patch as gitPatch,
+} from './workspace-git.ts';
 
 export interface Services {
   config: MaestroConfig;
@@ -454,6 +461,94 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     const { id } = req.params as { id: string };
     if (!s.engine.cancel(id)) return reply.code(409).send({ error: 'Run non annulable' });
     return { ok: true };
+  });
+
+  /*
+   * Modifications produites dans le répertoire de l'agent.
+   *
+   * Trois routes en lecture puis une en écriture, et l'écriture est
+   * volontairement séparée : voir ce qu'un agent a changé doit rester sans
+   * conséquence, livrer doit être un geste distinct et explicite.
+   */
+  app.get('/api/runs/:id/changes', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = s.store.getRun(id);
+    if (!run) return reply.code(404).send({ error: 'Run inconnu' });
+    const agent = s.agents.get(run.agentId);
+    if (!agent) return reply.code(404).send({ error: 'Agent inconnu' });
+    try {
+      return await gitChanges(agent.workspaceDir, s.store.getRunGitBase(id));
+    } catch (err) {
+      return reply
+        .code(500)
+        .send({ error: err instanceof Error ? err.message : 'Lecture git impossible' });
+    }
+  });
+
+  app.get('/api/runs/:id/patch', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = s.store.getRun(id);
+    if (!run) return reply.code(404).send({ error: 'Run inconnu' });
+    const agent = s.agents.get(run.agentId);
+    if (!agent) return reply.code(404).send({ error: 'Agent inconnu' });
+    try {
+      const text = await gitPatch(agent.workspaceDir);
+      // Téléchargement plutôt qu'affichage : un patch se relit dans un éditeur
+      // et s'applique avec git apply, il n'a pas vocation à s'ouvrir en page.
+      return reply
+        .header('content-type', 'text/x-patch; charset=utf-8')
+        .header('content-disposition', `attachment; filename="maestro-${id.slice(0, 8)}.patch"`)
+        .send(text);
+    } catch (err) {
+      const status = err instanceof WorkspaceGitError ? 409 : 500;
+      return reply
+        .code(status)
+        .send({ error: err instanceof Error ? err.message : 'Patch indisponible' });
+    }
+  });
+
+  /** Nom de branche proposé par défaut, pour préremplir le formulaire. */
+  app.get('/api/runs/:id/branch-name', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = s.store.getRun(id);
+    if (!run) return reply.code(404).send({ error: 'Run inconnu' });
+    return { branch: branchNameFor(run.prompt, run.id) };
+  });
+
+  app.post('/api/runs/:id/branch', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = s.store.getRun(id);
+    if (!run) return reply.code(404).send({ error: 'Run inconnu' });
+    const agent = s.agents.get(run.agentId);
+    if (!agent) return reply.code(404).send({ error: 'Agent inconnu' });
+
+    const body = (req.body ?? {}) as { branch?: string; message?: string; paths?: string[] };
+    const branch = body.branch?.trim() || branchNameFor(run.prompt, run.id);
+    /* Le prompt sert de message par défaut : c'est la meilleure description
+       disponible de l'intention, et elle vient de l'humain. */
+    const message =
+      body.message?.trim() ||
+      `${run.prompt.split('\n')[0]?.slice(0, 72) ?? 'Travail de l’agent'}\n\nProduit par l’agent ${agent.name} (run ${run.id}).`;
+
+    try {
+      const result = await commitToBranch(agent.workspaceDir, {
+        branch,
+        message,
+        ...(body.paths && body.paths.length > 0 ? { paths: body.paths } : {}),
+      });
+      s.bus.log(
+        'success',
+        'runs',
+        `Branche ${result.branch} créée depuis le run ${id.slice(0, 8)} (${result.files} fichier(s))`,
+      );
+      return result;
+    } catch (err) {
+      // 409 : la demande est refusée pour l'état du dépôt, pas pour une panne.
+      const status = err instanceof WorkspaceGitError ? 409 : 500;
+      return reply
+        .code(status)
+        .send({ error: err instanceof Error ? err.message : 'Livraison impossible' });
+    }
   });
 
   // -- Approbations ------------------------------------------------------------------

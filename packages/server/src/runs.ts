@@ -14,6 +14,7 @@ import type { Store } from './db.ts';
 import type { TaskService } from './kanban.ts';
 import { buildMaestroServer } from './mcp-control.ts';
 import { buildCustomServer } from './mcp-custom.ts';
+import { snapshot as gitSnapshot } from './workspace-git.ts';
 import { buildRagServer } from './mcp-rag.ts';
 import type { ApprovalBroker } from './permissions.ts';
 import type { McpRegistry } from './mcp-registry.ts';
@@ -300,6 +301,7 @@ export class RunEngine {
     run.status = 'running';
     run.startedAt = nowIso();
     this.store.updateRun(run);
+    await this.captureGitBase(run, agent);
     this.bus.publish({ type: 'run.updated', payload: run });
     if (run.origin === 'kanban' && run.originId) {
       this.tasks.onRunLifecycle(run.originId, run.id, 'started');
@@ -347,6 +349,34 @@ export class RunEngine {
     }
     parts.push(run.prompt);
     return parts.join('\n');
+  }
+
+  /**
+   * Enregistre l'état git du répertoire de l'agent avant que le run n'écrive.
+   *
+   * Sans ce point de référence, impossible de distinguer ensuite ce que l'agent
+   * a produit de ce qui traînait déjà — et imputer à une machine le travail en
+   * cours d'un humain est la pire façon de présenter un diff.
+   *
+   * Un échec est silencieux au niveau du run : la plupart des répertoires
+   * d'agents ne sont pas des dépôts, et ce n'est pas une anomalie. Le run n'a
+   * aucune raison d'échouer parce que git n'a rien à dire.
+   */
+  private async captureGitBase(run: Run, agent: AgentConfig): Promise<void> {
+    try {
+      const base = await gitSnapshot(agent.workspaceDir);
+      if (base) this.store.saveRunGitBase(run.id, base);
+    } catch (err) {
+      /* `snapshot` rend null sans lever quand le répertoire n'est pas un dépôt :
+         ce cas normal ne passe donc pas ici. Ce qui arrive ici est une vraie
+         anomalie — git absent, dépôt corrompu, permissions — et mérite le
+         journal. */
+      this.bus.log(
+        'warn',
+        'runs',
+        `Suivi git impossible pour ${agent.name} : ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private async executeSdk(

@@ -42,6 +42,7 @@ import {
   Spinner,
   StatusBadge,
 } from '../components/ui';
+import { RunChanges } from '../components/RunChanges';
 
 const EMPTY_EVENTS: RunEvent[] = [];
 /** Au-delà de cette taille, l'entrée d'un outil est repliée par défaut. */
@@ -523,6 +524,10 @@ export default function RunDetail() {
               </pre>
             </div>
           )}
+
+          {/* Avant le transcript : ce que le run a produit compte plus que la
+              façon dont il l'a dit. */}
+          <RunChanges runId={run.id} />
 
           <section aria-label="Transcript du run">
             <div className="row justify-between wrap">

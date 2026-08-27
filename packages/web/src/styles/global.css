@@ -2187,3 +2187,41 @@
     }
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Modifications d'un run : liste de fichiers et diff
+   ---------------------------------------------------------------------------
+   Les couleurs reprennent les jetons de succès et de danger déjà définis plutôt
+   que le vert et le rouge canoniques de git : deux palettes dans la même
+   interface se remarquent, et celle-ci passe déjà les contrastes. */
+
+.change-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.diff-view {
+  margin-top: var(--space-3);
+  line-height: 1.45;
+}
+
+.diff-add {
+  color: var(--ok);
+}
+
+.diff-del {
+  color: var(--danger);
+}
+
+.diff-hunk {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+.diff-file {
+  color: var(--text-faint);
+}

@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS idx_runs_agent ON runs(agent_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 
+CREATE TABLE IF NOT EXISTS run_git_base (
+  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+  head TEXT,
+  branch TEXT,
+  dirty TEXT NOT NULL DEFAULT '[]'
+);
+
 CREATE TABLE IF NOT EXISTS run_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id TEXT NOT NULL REFERENCES runs(id),
@@ -790,6 +797,39 @@ export class Store {
         run.endedAt,
         run.id,
       );
+  }
+
+  /**
+   * Point de référence git pris au démarrage d'un run.
+   *
+   * Table à part, et non colonnes de `runs` : cette donnée n'est lue que par la
+   * vue des modifications, alors que `Run` est diffusé à chaque événement
+   * WebSocket. Y ajouter une liste de fichiers aurait gonflé tous les messages
+   * du flux pour un usage ponctuel.
+   */
+  saveRunGitBase(
+    runId: string,
+    base: { head: string | null; branch: string | null; dirty: string[] },
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO run_git_base (run_id, head, branch, dirty) VALUES (?, ?, ?, ?)
+         ON CONFLICT(run_id) DO UPDATE SET head=excluded.head, branch=excluded.branch, dirty=excluded.dirty`,
+      )
+      .run(runId, base.head, base.branch, JSON.stringify(base.dirty));
+  }
+
+  getRunGitBase(
+    runId: string,
+  ): { head: string | null; branch: string | null; dirty: string[] } | null {
+    const row = this.db.prepare('SELECT * FROM run_git_base WHERE run_id = ?').get(runId) as
+      SqlRow | undefined;
+    if (!row) return null;
+    return {
+      head: strOrNull(row.head),
+      branch: strOrNull(row.branch),
+      dirty: safeJsonParse<string[]>(str(row.dirty), []),
+    };
   }
 
   getRun(id: string): Run | null {

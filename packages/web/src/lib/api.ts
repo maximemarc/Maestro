@@ -38,6 +38,8 @@ import type {
   Routine,
   Run,
   RunWithEvents,
+  WorkspaceChanges,
+  CommitResult,
   Settings,
   SkillDef,
   StartRunRequest,
@@ -126,6 +128,30 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T;
 }
 
+/**
+ * Télécharge le patch d'un run.
+ *
+ * Hors de `request` et hors d'un simple lien : la réponse n'est pas du JSON, et
+ * un `<a href>` n'emporterait pas l'en-tête d'authentification — le jeton vit en
+ * localStorage, pas en cookie. D'où le passage par un Blob.
+ */
+export async function downloadRunPatch(id: string): Promise<void> {
+  const res = await fetch(`/api/runs/${id}/patch`, {
+    headers: { ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(res.status, data?.error ?? `Erreur HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `maestro-${id.slice(0, 8)}.patch`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 export const api = {
   // Vue d'ensemble
   overview: () => request<OverviewResponse>('GET', '/api/overview'),
@@ -159,6 +185,12 @@ export const api = {
   },
   getRun: (id: string) => request<RunWithEvents>('GET', `/api/runs/${id}`),
   cancelRun: (id: string) => request<{ ok: boolean }>('POST', `/api/runs/${id}/cancel`),
+
+  // Modifications produites dans le répertoire de l'agent
+  runChanges: (id: string) => request<WorkspaceChanges>('GET', `/api/runs/${id}/changes`),
+  runBranchName: (id: string) => request<{ branch: string }>('GET', `/api/runs/${id}/branch-name`),
+  createRunBranch: (id: string, input: { branch: string; message?: string }) =>
+    request<CommitResult>('POST', `/api/runs/${id}/branch`, input),
 
   // Approbations
   listApprovals: (status?: string) =>
