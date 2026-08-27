@@ -261,7 +261,7 @@ définir `VOYAGE_API_KEY` ou `OPENAI_API_KEY` dans l'environnement du serveur :
 ## Démarrage rapide
 
 ```bash
-# Prérequis : Node.js >= 20 (Node 24 recommandé), Claude Code authentifié sur la machine
+# Prérequis : Node.js >= 22 (node:sqlite), Claude Code authentifié sur la machine
 git clone <ce dépôt> && cd maestro
 npm install
 

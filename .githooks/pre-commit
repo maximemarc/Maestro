@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+#
+# Garde-fou qualité local, à défaut de CI (aucun remote configuré).
+#
+# Ne tourne que si le commit touche du code : un commit de documentation n'a
+# rien à gagner d'un typecheck de trente secondes. Contournable par
+# `git commit --no-verify` — un garde-fou qu'on ne peut pas contourner finit
+# contourné par un `git commit -a` bâclé ailleurs.
+#
+# Les tests ne sont pas lancés par défaut : ils prennent le double du reste et
+# le typecheck attrape déjà la majorité des régressions à ce stade.
+# `MAESTRO_HOOK_TESTS=1 git commit …` les ajoute.
+set -euo pipefail
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+if ! echo "$staged" | grep -qE '\.(ts|tsx|mjs|css|json)$'; then
+  exit 0
+fi
+
+# `node:sqlite` exige Node >= 22, et le node du PATH peut être plus ancien.
+# On préfère une version compatible installée via nvm plutôt qu'échouer sur un
+# « No such built-in module » que personne ne relie à sa cause.
+node_ok() { [ "$(node -v 2>/dev/null | sed 's/^v\([0-9]*\).*/\1/')" -ge 22 ] 2>/dev/null; }
+if ! node_ok; then
+  for candidate in "$HOME"/.nvm/versions/node/v2[2-9]*/bin; do
+    if [ -x "$candidate/node" ]; then
+      PATH="$candidate:$PATH"
+      export PATH
+      break
+    fi
+  done
+fi
+if ! node_ok; then
+  echo "pre-commit : Node >= 22 introuvable (node:sqlite en a besoin)." >&2
+  echo "             Installe-le, ou passe outre avec git commit --no-verify." >&2
+  exit 1
+fi
+
+echo "pre-commit : contrôle qualité (Node $(node -v))…"
+npm run typecheck --silent
+npm run lint --silent
+npm run format:check --silent
+if [ "${MAESTRO_HOOK_TESTS:-0}" = "1" ]; then
+  npm run test --silent
+fi
+echo "pre-commit : conforme."
