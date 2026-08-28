@@ -196,6 +196,7 @@ const TRUNCATION_MARK = ' …[tronqué]';
 
 export const EMPTY_COMPRESSION: TrajectoryCompression = {
   applied: false,
+  withinBudget: true,
   tokenBudget: null,
   tokensBefore: 0,
   tokensAfter: 0,
@@ -323,6 +324,13 @@ export function compressTrajectory(
   const after = estimateTokens(turns);
   compression.applied = true;
   compression.tokensAfter = after;
+  /*
+   * Le budget est un objectif, pas une garantie. Une trajectoire faite d'un seul
+   * tour très long ne peut plus rétrécir sans perdre la paire consigne/réponse
+   * qui fait tout son intérêt : on le dit, plutôt que de laisser croire à un
+   * corpus calibré.
+   */
+  compression.withinBudget = after <= tokenBudget;
   const toolsUsed = [...new Set(turns.flatMap((t) => (t.toolCalls ?? []).map((c) => c.name)))];
 
   return {
@@ -338,6 +346,8 @@ export function mergeCompression(
 ): TrajectoryCompression {
   return {
     applied: a.applied || b.applied,
+    // Une seule trajectoire hors budget suffit à ce que le corpus ne le soit pas.
+    withinBudget: a.withinBudget && b.withinBudget,
     tokenBudget: b.tokenBudget ?? a.tokenBudget,
     tokensBefore: a.tokensBefore + b.tokensBefore,
     tokensAfter: a.tokensAfter + b.tokensAfter,

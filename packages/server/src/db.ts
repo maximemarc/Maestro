@@ -328,7 +328,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 const DEFAULT_SETTINGS: Settings = {
   instanceName: 'Maestro',
-  telegramNotifyAllRuns: false,
+  notifyAllRuns: false,
   approvalTimeoutSec: 900,
   maxConcurrentRuns: 4,
   maxAgentDepth: 2,
@@ -1391,6 +1391,20 @@ export class Store {
       const key = str(row.key) as keyof Settings;
       (stored as Record<string, unknown>)[key] = safeJsonParse(str(row.value), undefined);
     }
+    /*
+     * Reprise de l'ancienne clé.
+     *
+     * `telegramNotifyAllRuns` datait de l'époque où Telegram était le seul
+     * canal. Renommer sans reprendre l'ancienne valeur aurait remis
+     * silencieusement à « non » le réglage de qui l'avait activé — le pire des
+     * cas, puisque rien ne l'aurait signalé.
+     */
+    const legacy = (stored as Record<string, unknown>).telegramNotifyAllRuns;
+    if (stored.notifyAllRuns === undefined && typeof legacy === 'boolean') {
+      stored.notifyAllRuns = legacy;
+    }
+    delete (stored as Record<string, unknown>).telegramNotifyAllRuns;
+
     return { ...DEFAULT_SETTINGS, ...stored };
   }
 

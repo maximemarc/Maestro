@@ -147,6 +147,8 @@ function doneCount(batch: TrainingBatch): number {
 function statusTone(status: TrainingBatch['status']): string {
   if (status === 'running') return 'running';
   if (status === 'succeeded') return 'succeeded';
+  /* « partial » n'est pas un succès : un lot avec des échecs se signale. */
+  if (status === 'partial') return 'waiting_approval';
   if (status === 'failed') return 'failed';
   if (status === 'cancelled') return 'cancelled';
   if (status === 'paused') return 'waiting_approval';
@@ -158,6 +160,7 @@ export default function TrainingPage() {
   const agents = useStore((s) => s.agents);
   const skills = useStore((s) => s.skills);
   const trainingItems = useStore((s) => s.trainingItems);
+  const truncatedByBatch = useStore((s) => s.trainingItemsTruncated);
   const loadTrainingItems = useStore((s) => s.loadTrainingItems);
   const notify = useStore((s) => s.notify);
 
@@ -450,6 +453,7 @@ export default function TrainingPage() {
               <BatchDetail
                 batch={batches.find((b) => b.id === openBatchId) ?? null}
                 items={sortedItems}
+                truncated={Boolean(truncatedByBatch[openBatchId])}
                 onClose={() => setOpenBatchId(null)}
                 onError={setPageError}
               />
@@ -653,10 +657,11 @@ export default function TrainingPage() {
 function BatchDetail(props: {
   batch: TrainingBatch | null;
   items: TrainingItem[];
+  truncated: boolean;
   onClose: () => void;
   onError: (message: string | null) => void;
 }) {
-  const { batch, items, onClose, onError } = props;
+  const { batch, items, truncated, onClose, onError } = props;
   if (!batch) return null;
 
   const score = async (item: TrainingItem, value: number) => {
@@ -696,6 +701,15 @@ function BatchDetail(props: {
           Coût <b>{fmtCost(items.reduce((sum, i) => sum + i.costUsd, 0))}</b>
         </span>
       </div>
+
+      {/* Une liste tronquee qui ne le dit pas fait croire a un lot plus petit
+          qu'il n'est, et rend inexplicable l'impossibilite de noter le reste. */}
+      {truncated && (
+        <p className="text-warn text-xs mb-2">
+          Seuls les {items.length} premiers echantillons sur {batch.checkpointIndex} sont affiches.
+          L’export, lui, porte sur la totalite du lot.
+        </p>
+      )}
 
       {items.length === 0 ? (
         <EmptyState

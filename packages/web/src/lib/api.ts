@@ -452,7 +452,12 @@ export const api = {
   deleteTrainingBatch: (id: string) =>
     request<{ ok: boolean }>('DELETE', `/api/training/batches/${id}`),
   getTrainingBatch: (id: string) =>
-    request<{ batch: TrainingBatch; items: TrainingItem[] }>('GET', `/api/training/batches/${id}`),
+    request<{
+      batch: TrainingBatch;
+      items: TrainingItem[];
+      itemsTruncated: boolean;
+      itemTotal: number;
+    }>('GET', `/api/training/batches/${id}`),
   startTrainingBatch: (id: string) =>
     request<TrainingBatch>('POST', `/api/training/batches/${id}/start`),
   pauseTrainingBatch: (id: string) =>

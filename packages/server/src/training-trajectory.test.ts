@@ -227,8 +227,26 @@ describe('compression sous budget', () => {
   it('respecte le budget demandé', () => {
     const out = compressTrajectory(heavy(), 800);
     expect(out.compression.applied).toBe(true);
+    expect(out.compression.withinBudget).toBe(true);
     expect(out.trajectory.estimatedTokens).toBeLessThanOrEqual(800);
     expect(estimateTokens(out.trajectory.turns)).toBe(out.trajectory.estimatedTokens);
+  });
+
+  /*
+   * Le budget est un objectif, pas une garantie : une trajectoire réduite à sa
+   * consigne et sa réponse ne peut plus rétrécir. Le taire laisserait croire à
+   * un corpus calibré qui ne l'est pas.
+   */
+  it('avoue quand la compression ne suffit pas', () => {
+    const t = buildTrajectory(
+      makeRun({ resultText: null }),
+      [ev('assistant_text', { text: 'x'.repeat(20_000) })],
+      { agentName: 'A' },
+    );
+    const out = compressTrajectory(t, 50);
+    expect(out.compression.applied).toBe(true);
+    expect(out.compression.withinBudget).toBe(false);
+    expect(out.trajectory.estimatedTokens).toBeGreaterThan(50);
   });
 
   it('sacrifie la réflexion avant les retours d’outils', () => {
@@ -298,6 +316,7 @@ describe('agrégation des comptes rendus', () => {
     ).compression;
     const merged = mergeCompression(a, {
       applied: true,
+      withinBudget: false,
       tokenBudget: 500,
       tokensBefore: 10,
       tokensAfter: 5,

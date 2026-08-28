@@ -116,7 +116,7 @@ export class TelegramBot {
     const settings = this.store.getSettings();
     const shouldNotify =
       run.origin === 'telegram' ||
-      settings.telegramNotifyAllRuns ||
+      settings.notifyAllRuns ||
       (run.origin === 'routine' && this.routineWantsNotify(run.originId));
     if (!shouldNotify) return;
     const agent = this.agents.get(run.agentId);

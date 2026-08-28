@@ -672,8 +672,13 @@ export interface LogLine {
 export interface Settings {
   /** Nom d'instance affiché dans l'UI. */
   instanceName: string;
-  /** Notifications Telegram pour toutes les fins de run (pas seulement origin telegram). */
-  telegramNotifyAllRuns: boolean;
+  /**
+   * Notifier la fin de tous les runs sur les canaux de messagerie, et pas
+   * seulement ceux qui en viennent. Le réglage s'appelait
+   * `telegramNotifyAllRuns` quand Telegram était le seul canal ; l'ancienne clé
+   * est reprise à la lecture, personne ne perd son choix.
+   */
+  notifyAllRuns: boolean;
   /** Délai (s) avant expiration automatique d'une approbation en attente. */
   approvalTimeoutSec: number;
   /** Nombre max de runs simultanés toutes files confondues. */
@@ -1143,6 +1148,15 @@ export interface Trajectory {
 /** Compte rendu d'une compression : ce qui a été sacrifié, et pourquoi. */
 export interface TrajectoryCompression {
   applied: boolean;
+  /**
+   * Faux quand la compression n'a pas suffi à tenir le budget.
+   *
+   * Le budget est un objectif, pas une garantie : une trajectoire faite d'un
+   * seul tour très long ne peut pas rétrécir davantage sans perdre la paire
+   * consigne/réponse qui fait tout son intérêt. Le taire laisserait croire à un
+   * corpus calibré qui ne l'est pas.
+   */
+  withinBudget: boolean;
   tokenBudget: number | null;
   tokensBefore: number;
   tokensAfter: number;
@@ -1216,7 +1230,20 @@ export interface TrainingExportPreview {
 // -- Lots de génération -----------------------------------------------------
 
 export type TrainingBatchStatus =
-  'draft' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
+  | 'draft'
+  | 'running'
+  | 'paused'
+  | 'succeeded'
+  /**
+   * Terminé, mais avec des échecs.
+   *
+   * Un lot de mille échantillons dont trente-sept ont échoué n'est ni un succès
+   * ni un échec : marqué « succeeded » il mentait, marqué « failed » il aurait
+   * fait jeter neuf cent soixante-trois trajectoires exploitables.
+   */
+  | 'partial'
+  | 'failed'
+  | 'cancelled';
 
 export type TrainingItemStatus =
   'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled';

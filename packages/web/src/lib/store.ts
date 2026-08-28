@@ -84,6 +84,8 @@ export interface MaestroStore {
   trainingBatches: TrainingBatch[];
   /** Échantillons, par lot, chargés à l'ouverture du détail d'un lot. */
   trainingItems: Record<string, TrainingItem[]>;
+  /** Lots dont la liste d'échantillons est tronquée — l'affichage doit le dire. */
+  trainingItemsTruncated: Record<string, boolean>;
   /** Notifications transitoires, rendues par ToastHost. */
   toasts: Toast[];
 
@@ -108,6 +110,7 @@ export const useStore = create<MaestroStore>((set, get) => ({
   ragCollections: [],
   trainingBatches: [],
   trainingItems: {},
+  trainingItemsTruncated: {},
   metrics: null,
   agents: [],
   runs: [],
@@ -187,10 +190,13 @@ export const useStore = create<MaestroStore>((set, get) => ({
   },
 
   loadTrainingItems: async (batchId) => {
-    const { batch, items } = await api.getTrainingBatch(batchId);
+    const { batch, items, itemsTruncated } = await api.getTrainingBatch(batchId);
     set((state) => ({
       trainingBatches: upsertById(state.trainingBatches, batch),
       trainingItems: { ...state.trainingItems, [batchId]: items },
+      trainingItemsTruncated: itemsTruncated
+        ? { ...state.trainingItemsTruncated, [batchId]: true }
+        : state.trainingItemsTruncated,
     }));
   },
 

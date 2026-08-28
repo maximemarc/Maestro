@@ -383,6 +383,45 @@ describe('exécution', () => {
     expect(service.items(batch.id)[0]?.status).toBe('succeeded');
   });
 
+  /*
+   * Le statut ne doit pas mentir. « succeeded » avec des échecs cachait le
+   * défaut ; « failed » avec une seule erreur sur mille aurait fait jeter le
+   * reste. D'où un troisième état, et le décompte dans le message.
+   */
+  it('rend un lot partiel quand certains échantillons échouent', async () => {
+    const { service, engine } = setup(['a1']);
+    engine.script = [{ status: 'succeeded' }, { status: 'failed' }];
+    const batch = service.create({ name: 'x', spec: spec({ samples: 2, maxAttempts: 1 }) });
+    service.start(batch.id);
+    await vi.waitFor(() => expect(service.get(batch.id)?.status).toBe('partial'));
+
+    const final = service.get(batch.id);
+    expect(final?.counts.succeeded).toBe(1);
+    expect(final?.counts.failed).toBe(1);
+    expect(final?.error).toContain('1 échantillon(s) en échec');
+  });
+
+  it('reste « succeeded » quand rien n’échoue', async () => {
+    const { service } = setup(['a1']);
+    const batch = service.create({ name: 'x', spec: spec({ samples: 2 }) });
+    service.start(batch.id);
+    await vi.waitFor(() => expect(service.get(batch.id)?.status).toBe('succeeded'));
+    expect(service.get(batch.id)?.error).toBeNull();
+  });
+
+  /* Une liste tronquée qui ne le dit pas fait croire à un lot plus petit. */
+  it('avoue une liste d’échantillons complète', async () => {
+    const { service } = setup(['a1']);
+    const batch = service.create({ name: 'x', spec: spec({ samples: 3 }) });
+    service.start(batch.id);
+    await vi.waitFor(() => expect(service.get(batch.id)?.status).not.toBe('running'));
+
+    const page = service.itemPage(batch.id);
+    expect(page.total).toBe(3);
+    expect(page.items).toHaveLength(3);
+    expect(page.truncated).toBe(false);
+  });
+
   it('abandonne un échantillon après la dernière tentative', async () => {
     const { service, engine } = setup(['a1']);
     engine.script = [{ status: 'failed' }];

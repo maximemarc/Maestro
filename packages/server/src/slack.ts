@@ -268,7 +268,7 @@ export class SlackBot {
   }
 
   private async notifyRunEnd(run: Run): Promise<void> {
-    if (!this.store.getSettings().telegramNotifyAllRuns && run.origin !== 'slack') return;
+    if (!this.store.getSettings().notifyAllRuns && run.origin !== 'slack') return;
     const agent = this.agents.get(run.agentId);
     const icon = run.status === 'succeeded' ? '✅' : '❌';
     const text = [

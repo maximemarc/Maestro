@@ -46,8 +46,17 @@ const DEFAULT_ITEM_TIMEOUT_MS = 30 * 60 * 1000;
  * requête qui fige le serveur sur une base d'un an.
  */
 const EXPORT_RUN_SCAN_LIMIT = 500;
-/** Délai d'attente d'une notation : un juge doit répondre court et vite. */
-const GRADER_TIMEOUT_MS = 5 * 60 * 1000;
+/** Échantillons rendus d'un coup par l'API. La troncature est signalée. */
+const ITEM_PAGE = 2000;
+/**
+ * Délai d'attente d'une notation.
+ *
+ * Un juge répond court, mais il peut devoir attendre son tour : si son agent
+ * appartient au pool du lot, sa notation fait la queue derrière un échantillon
+ * en cours. D'où une marge large — un score perdu pour cause de délai est une
+ * donnée d'entraînement muette, sans que rien ne l'explique.
+ */
+const GRADER_TIMEOUT_MS = 15 * 60 * 1000;
 
 export class TrainingError extends Error {}
 
@@ -181,7 +190,21 @@ export class TrainingService {
   }
 
   items(batchId: string): TrainingItem[] {
-    return this.store.listTrainingItems(batchId);
+    return this.store.listTrainingItems(batchId, ITEM_PAGE);
+  }
+
+  /**
+   * Échantillons d'un lot, avec l'aveu de troncature.
+   *
+   * Un lot peut compter dix mille échantillons ; en rendre deux mille sans le
+   * dire faisait croire à un lot plus petit qu'il n'est, et rendait inexplicable
+   * l'impossibilité de noter le reste. L'export, lui, n'est pas borné : il lit
+   * les runs, pas cette liste.
+   */
+  itemPage(batchId: string): { items: TrainingItem[]; truncated: boolean; total: number } {
+    const items = this.items(batchId);
+    const total = this.store.getTrainingBatch(batchId)?.checkpointIndex ?? items.length;
+    return { items, truncated: items.length < total, total };
   }
 
   /** Runs et scores d'un lot — ce que l'export va lire. */
@@ -504,6 +527,20 @@ export class TrainingService {
     const state: BatchState = { stop: null, pause: false };
     this.running.set(batchId, state);
 
+    /*
+     * Juge pris dans le pool : sa notation attendra que l'agent se libère, ce qui
+     * ralentit le lot sans le casser. On le signale — le symptôme (des scores qui
+     * manquent, ou un lot deux fois plus lent) ne mène pas de lui-même à sa cause.
+     */
+    if (batch.spec.grader && batch.spec.agentIds.includes(batch.spec.grader.agentId)) {
+      this.bus.log(
+        'warn',
+        'training',
+        `Lot « ${batch.name} » : l'agent juge fait aussi partie du pool. Chaque notation ` +
+          `attendra qu'il se libère. Confie le jugement à un agent hors pool pour éviter ce goulot.`,
+      );
+    }
+
     const pool = batch.spec.agentIds.filter((id) => this.agents.get(id));
     const workerCount = Math.max(1, Math.min(batch.spec.workers, pool.length));
     if (workerCount < batch.spec.workers) {
@@ -560,7 +597,17 @@ export class TrainingService {
     const counts = this.store.getTrainingBatch(batchId)?.counts;
     const failed = counts?.failed ?? 0;
     const succeeded = counts?.succeeded ?? 0;
-    this.finish(batchId, succeeded === 0 && failed > 0 ? 'failed' : 'succeeded');
+    /*
+     * Le statut ne ment pas sur ce qui s'est passé. « succeeded » avec trente-sept
+     * échecs cachait le défaut ; « failed » avec une seule erreur sur mille aurait
+     * fait jeter le reste.
+     */
+    const outcome = failed === 0 ? 'succeeded' : succeeded === 0 ? 'failed' : 'partial';
+    this.finish(
+      batchId,
+      outcome,
+      failed > 0 ? `${failed} échantillon(s) en échec sur ${succeeded + failed}` : undefined,
+    );
   }
 
   private async runItem(

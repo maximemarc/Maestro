@@ -209,12 +209,10 @@ export default function SettingsPage() {
               <label className="checkbox-row mb-3">
                 <input
                   type="checkbox"
-                  checked={settings.telegramNotifyAllRuns}
-                  onChange={(e) =>
-                    setSettings({ ...settings, telegramNotifyAllRuns: e.target.checked })
-                  }
+                  checked={settings.notifyAllRuns}
+                  onChange={(e) => setSettings({ ...settings, notifyAllRuns: e.target.checked })}
                 />
-                Notifier chaque fin de run sur Telegram
+                Notifier chaque fin de run sur les canaux de messagerie
               </label>
 
               <label className="checkbox-row mb-2">

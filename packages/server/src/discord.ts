@@ -309,11 +309,9 @@ export class DiscordBot {
     const settings = this.store.getSettings();
     /*
      * On ne parle que des runs venus de Discord, sauf si l'utilisateur veut
-     * être notifié de tous. Le réglage s'appelle encore `telegramNotifyAllRuns`
-     * — il précède les autres canaux ; le renommer imposerait de migrer les
-     * réglages enregistrés pour un gain purement cosmétique.
+     * être notifié de tous.
      */
-    if (!settings.telegramNotifyAllRuns && run.origin !== 'discord') return;
+    if (!settings.notifyAllRuns && run.origin !== 'discord') return;
     const agent = this.agents.get(run.agentId);
     const icon = run.status === 'succeeded' ? '✅' : '❌';
     const text = [

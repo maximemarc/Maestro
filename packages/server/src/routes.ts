@@ -374,7 +374,7 @@ const installPluginSchema = z.object({
 
 const settingsSchema = z.object({
   instanceName: z.string().min(1).max(60).optional(),
-  telegramNotifyAllRuns: z.boolean().optional(),
+  notifyAllRuns: z.boolean().optional(),
   approvalTimeoutSec: z.number().int().min(30).max(86400).optional(),
   maxConcurrentRuns: z.number().int().min(1).max(32).optional(),
   maxAgentDepth: z.number().int().min(0).max(5).optional(),
@@ -1082,7 +1082,8 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     const { id } = req.params as { id: string };
     const batch = s.training.get(id);
     if (!batch) return reply.code(404).send({ error: 'Lot introuvable' });
-    return { batch, items: s.training.items(id) };
+    const { items, truncated, total } = s.training.itemPage(id);
+    return { batch, items, itemsTruncated: truncated, itemTotal: total };
   });
 
   app.patch('/api/training/batches/:id', async (req, reply) => {
