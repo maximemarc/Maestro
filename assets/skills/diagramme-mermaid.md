@@ -9,13 +9,13 @@ a échoué.
 
 ## Choisir le bon type
 
-| Ce que tu montres | Type |
-|---|---|
-| Un enchaînement de décisions | `flowchart TD` |
-| Un dialogue entre composants dans le temps | `sequenceDiagram` |
-| Un modèle de données | `erDiagram` |
-| Les états d'un objet et ses transitions | `stateDiagram-v2` |
-| Un découpage en couches ou en modules | `flowchart LR` avec `subgraph` |
+| Ce que tu montres                          | Type                           |
+| ------------------------------------------ | ------------------------------ |
+| Un enchaînement de décisions               | `flowchart TD`                 |
+| Un dialogue entre composants dans le temps | `sequenceDiagram`              |
+| Un modèle de données                       | `erDiagram`                    |
+| Les états d'un objet et ses transitions    | `stateDiagram-v2`              |
+| Un découpage en couches ou en modules      | `flowchart LR` avec `subgraph` |
 
 Un diagramme de séquence pour montrer une structure, ou un flowchart pour montrer
 une chronologie, sont les deux erreurs les plus fréquentes.

@@ -29,6 +29,8 @@ import { registerRoutes } from './routes.ts';
 import { RunEngine } from './runs.ts';
 import { Scheduler } from './scheduler.ts';
 import { SkillRegistry } from './skills.ts';
+import { DiscordBot } from './discord.ts';
+import { SlackBot } from './slack.ts';
 import { TelegramBot } from './telegram.ts';
 import { TmuxBridge } from './tmux.ts';
 import { TrainingService } from './training.ts';
@@ -80,12 +82,16 @@ const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
 const training = new TrainingService(store, bus, engine, agents);
 const telegram = new TelegramBot(config, store, bus, engine, agents, approvals);
+const discord = new DiscordBot(config, store, bus, engine, agents, approvals);
+const slack = new SlackBot(config, store, bus, engine, agents);
 const connectors = new ConnectorRegistry();
 const radar = new SessionRadar(config, store, bus, agents);
 
 skills.syncAllWorkspaces();
 scheduler.init();
 telegram.start();
+discord.start();
+slack.start();
 /*
  * Après `failStaleActiveRuns` : les runs orphelins sont déjà clôturés, la
  * reprise voit donc des échantillons dont le run est bel et bien terminé et
@@ -252,6 +258,8 @@ const shutdown = async (): Promise<void> => {
   radar.stop();
   scheduler.shutdown();
   telegram.stop();
+  discord.stop();
+  slack.stop();
   // Avant l'arrêt du moteur : les lots cessent de dépiler, et restent marqués
   // « running » pour reprendre au prochain démarrage.
   training.shutdown();

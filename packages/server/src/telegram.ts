@@ -12,6 +12,7 @@ import type { MaestroConfig } from './config.ts';
 import type { Store } from './db.ts';
 import type { ApprovalBroker } from './permissions.ts';
 import type { RunEngine } from './runs.ts';
+import { executeChatCommand, parseChatCommand, renderHtml } from './chat-commands.ts';
 import { truncate } from './util.ts';
 
 interface TgUpdate {
@@ -175,65 +176,34 @@ export class TelegramBot {
     const msg = update.message;
     if (!msg?.text) return;
     if (!this.isAllowed(msg.chat.id)) return;
-    const text = msg.text.trim();
 
-    if (text === '/start' || text === '/help') {
-      await this.reply(
-        msg.chat.id,
-        '🎛 <b>Maestro</b>\n/agents — liste des agents\n/status — état de l’orchestrateur\n/approvals — approbations en attente\n/run &lt;agent&gt; &lt;prompt&gt; — lancer un run',
-      );
-    } else if (text === '/agents') {
-      const list = this.agents
-        .list()
-        .map(
-          (a) => `${a.emoji} <b>${escapeHtml(a.name)}</b> — ${escapeHtml(a.model)} (${a.engine})`,
-        )
-        .join('\n');
-      await this.reply(msg.chat.id, list || 'Aucun agent.');
-    } else if (text === '/status') {
-      await this.reply(
-        msg.chat.id,
-        `Runs actifs : ${this.engine.activeCount()}\nEn file : ${this.engine.queuedCount()}\nApprobations en attente : ${this.store.countPendingApprovals()}`,
-      );
-    } else if (text === '/approvals') {
-      const pending = this.store.listApprovals('pending');
-      if (pending.length === 0) {
-        await this.reply(msg.chat.id, 'Aucune approbation en attente.');
-        return;
-      }
-      for (const approval of pending.slice(0, 5)) {
-        await this.notifyApproval(approval.id);
-      }
-    } else if (text.startsWith('/run ')) {
-      const rest = text.slice(5).trim();
-      const spaceIdx = rest.indexOf(' ');
-      if (spaceIdx === -1) {
-        await this.reply(msg.chat.id, 'Usage : /run &lt;agent&gt; &lt;prompt&gt;');
-        return;
-      }
-      const agentName = rest.slice(0, spaceIdx);
-      const prompt = rest.slice(spaceIdx + 1).trim();
-      const agent = this.agents.getByName(agentName);
-      if (!agent) {
-        const names = this.agents
-          .list()
-          .map((a) => a.name)
-          .join(', ');
-        await this.reply(
-          msg.chat.id,
-          `Agent « ${escapeHtml(agentName)} » introuvable. Disponibles : ${escapeHtml(names)}`,
-        );
-        return;
-      }
-      try {
-        const run = this.engine.start({ agentId: agent.id, prompt, origin: 'telegram' });
-        await this.reply(
-          msg.chat.id,
-          `🚀 Run <code>${run.id}</code> lancé pour ${agent.emoji} <b>${escapeHtml(agent.name)}</b>. Je te notifie à la fin.`,
-        );
-      } catch (err) {
-        await this.reply(msg.chat.id, `Échec du lancement : ${escapeHtml(String(err))}`);
-      }
+    /*
+     * Les commandes sont désormais décidées par `chat-commands.ts`, partagé avec
+     * Discord et Slack : une commande corrigée l'est sur les trois canaux. Le
+     * transport ne garde que ce qui lui est propre — le rendu HTML et les
+     * boutons d'approbation, que les deux autres n'ont pas.
+     */
+    const command = parseChatCommand(msg.text);
+    const reply = executeChatCommand(command, {
+      listAgents: () => this.agents.list(),
+      findAgent: (name) => this.agents.getByName(name),
+      activeRuns: () => this.engine.activeCount(),
+      queuedRuns: () => this.engine.queuedCount(),
+      pendingApprovals: () => this.store.countPendingApprovals(),
+      listPendingApprovalIds: (limit) =>
+        this.store
+          .listApprovals('pending')
+          .slice(0, limit)
+          .map((a) => a.id),
+      startRun: (agentId, prompt) => this.engine.start({ agentId, prompt, origin: 'telegram' }).id,
+    });
+    if (!reply) return;
+
+    await this.reply(msg.chat.id, renderHtml(reply));
+    // Les approbations repassent par le rendu à boutons : c'est le seul canal
+    // qui sait les résoudre sur place.
+    for (const approvalId of reply.approvalIds ?? []) {
+      await this.notifyApproval(approvalId);
     }
   }
 

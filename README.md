@@ -306,11 +306,30 @@ exporter au format d'un outil de fine-tuning.
 - Outil MCP `maestro_send_to_agent` : un agent confie une sous-tâche à un autre
   (asynchrone, ou bloquant avec `wait=true`), profondeur limitée (anti-boucle)
 
-### Telegram
+### Messagerie — Telegram, Discord, Slack
 
-- Bot bidirectionnel : notifications de fin de run, **approbations par boutons**,
-  `/run <agent> <prompt>`, `/status`, `/agents`, `/approvals`
-- Whitelist stricte de chats (`TELEGRAM_CHAT_IDS`)
+Les trois canaux répondent aux mêmes commandes : `/agents`, `/status`,
+`/approvals`, `/run <agent> <prompt>`. La logique est partagée
+(`chat-commands.ts`) et seul le rendu diffère — HTML pour Telegram, markdown pour
+Discord, mrkdwn pour Slack ; une commande corrigée l'est sur les trois.
+
+- **Telegram** — bot bidirectionnel, notifications de fin de run et
+  **approbations résolues par boutons**, directement dans la conversation
+- **Discord** — Gateway WebSocket, sans dépendance. ⚠️ L'intent privilégié
+  « Message Content » doit être activé dans le portail développeur, faute de quoi
+  les messages arrivent sans texte ; Maestro le détecte et le dit dans ses
+  journaux plutôt que de rester muet
+- **Slack** — Socket Mode, et non l'API Events : celle-ci exigerait une URL
+  publique que Slack appelle. Maestro étant fait pour tourner derrière un
+  pare-feu, c'est lui qui se connecte. Deux jetons distincts : `xapp-` ouvre la
+  socket, `xoxb-` poste
+- 🔒 **Liste blanche stricte et obligatoire** sur les trois canaux : un jeton sans
+  liste laisse la passerelle inactive, et le démarrage le signale. Un bot qui
+  répond partout exécute des agents pour n'importe qui
+- Les approbations ne se résolvent par boutons que sur Telegram : Discord et
+  Slack exigeraient un point d'entrée HTTP public pour recevoir les
+  interactions. Sur ces deux canaux, la demande est notifiée et renvoie vers
+  l'interface
 
 ### Analytique & garde-fous
 

@@ -145,10 +145,15 @@ export type RunOrigin =
   | 'routine'
   | 'kanban'
   | 'telegram'
+  | 'discord'
+  | 'slack'
   | 'pipeline'
   | 'agent'
   /** Échantillon d'un lot de génération de données d'entraînement. */
   | 'training';
+
+/** Origines conversationnelles : celles dont on notifie la fin dans le canal. */
+export const CHAT_ORIGINS: readonly RunOrigin[] = ['telegram', 'discord', 'slack'];
 
 export type RunStatus =
   'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled' | 'timeout';

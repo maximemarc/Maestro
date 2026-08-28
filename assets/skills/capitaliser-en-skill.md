@@ -21,12 +21,12 @@ pire qu'un registre vide : il dilue les vraies, et on cesse de les lire.
 
 ## Mémoire ou skill
 
-| Ce que tu retiens | Où |
-|---|---|
+| Ce que tu retiens                                              | Où      |
+| -------------------------------------------------------------- | ------- |
 | Un fait sur l'environnement (« la base est sur le port 5433 ») | mémoire |
-| Une préférence de l'utilisateur | mémoire |
-| Une méthode, un ordre d'opérations, un piège récurrent | skill |
-| Une correspondance de vocabulaire métier | skill |
+| Une préférence de l'utilisateur                                | mémoire |
+| Une méthode, un ordre d'opérations, un piège récurrent         | skill   |
+| Une correspondance de vocabulaire métier                       | skill   |
 
 ## Ce qu'une bonne skill contient
 

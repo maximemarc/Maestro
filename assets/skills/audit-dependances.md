@@ -10,7 +10,7 @@ et ce qui ne bougera jamais.
 ## Relever
 
 1. **Vulnérabilités connues** — outil du gestionnaire de paquets (`npm audit`,
-   `composer audit`). Note le niveau, et surtout si le chemin est *atteignable* :
+   `composer audit`). Note le niveau, et surtout si le chemin est _atteignable_ :
    une faille dans un paquet employé seulement par un outil de build local ne
    présente pas le même risque qu'une faille dans le serveur HTTP.
 2. **Abandon** — date du dernier publiement, activité du dépôt, ouverture des

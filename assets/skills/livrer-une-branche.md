@@ -29,8 +29,8 @@ de soixante lignes qui fait deux choses ne se relit pas, il s'approuve.
 ## Le message
 
 - **Première ligne** : l'effet obtenu, à l'impératif ou au substantif, sous
-  70 caractères. Pas « fix bug » : *quel* bug, et qu'est-ce qui marche maintenant.
-- **Corps** : le *pourquoi*. Le quoi est dans le diff, il n'a pas besoin d'être
+  70 caractères. Pas « fix bug » : _quel_ bug, et qu'est-ce qui marche maintenant.
+- **Corps** : le _pourquoi_. Le quoi est dans le diff, il n'a pas besoin d'être
   répété. Ce qui manque au diff, c'est ce qu'on a essayé d'abord, la contrainte
   qui a imposé cette forme, le défaut que ça corrige.
 - **Ce qu'on ne met pas** : la liste des fichiers touchés, la reformulation du
