@@ -1167,7 +1167,7 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
   /** Aperçu : compte, écarts et compression, sans produire le fichier. */
   app.post('/api/training/export/preview', async (req) => {
     const input = parseOr400(trainingExportSchema, req.body);
-    return s.training.buildDataset(input).preview;
+    return (await s.training.buildDataset(input)).preview;
   });
 
   /**
@@ -1179,7 +1179,7 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
    */
   app.post('/api/training/export', async (req, reply) => {
     const input = parseOr400(trainingExportSchema, req.body);
-    const { lines } = s.training.buildDataset(input);
+    const { lines } = await s.training.buildDataset(input);
     const stamp = nowIso().slice(0, 19).replaceAll(':', '-');
     reply
       .header('content-type', 'application/x-ndjson; charset=utf-8')

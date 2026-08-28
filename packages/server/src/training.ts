@@ -46,6 +46,8 @@ const DEFAULT_ITEM_TIMEOUT_MS = 30 * 60 * 1000;
  * requête qui fige le serveur sur une base d'un an.
  */
 const EXPORT_RUN_SCAN_LIMIT = 500;
+/** Runs traités avant de rendre la main à la boucle d'événements. */
+const EXPORT_YIELD_EVERY = 20;
 /** Échantillons rendus d'un coup par l'API. La troncature est signalée. */
 const ITEM_PAGE = 2000;
 /**
@@ -223,7 +225,7 @@ export class TrainingService {
    * celles du travail réel, produites avant même qu'on songe à en faire un jeu
    * de données.
    */
-  buildDataset(request: TrainingExportRequest): ExportResult {
+  async buildDataset(request: TrainingExportRequest): Promise<ExportResult> {
     const dialect =
       request.dialect && isToolCallDialect(request.dialect) ? request.dialect : DEFAULT_DIALECT;
 
@@ -245,7 +247,21 @@ export class TrainingService {
      * — alors que tous les autres motifs de rejet sont, eux, rapportés.
      */
     const missing: Array<{ runId: string; reason: string }> = [];
+    let sinceYield = 0;
     for (const ref of refs) {
+      /*
+       * Rendre la main périodiquement.
+       *
+       * Construire les trajectoires de cinq cents runs relit chaque événement de
+       * chacun : entièrement synchrone, cela bloquait la boucle d'événements le
+       * temps de l'export, et l'interface gelait — y compris pour les autres
+       * utilisateurs. Une pause tous les vingt runs suffit à garder le serveur
+       * répondant, pour un surcoût négligeable.
+       */
+      if (++sinceYield >= EXPORT_YIELD_EVERY) {
+        sinceYield = 0;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
       const run = this.store.getRun(ref.runId);
       if (!run) {
         missing.push({ runId: ref.runId, reason: 'run supprimé (agent effacé ?)' });

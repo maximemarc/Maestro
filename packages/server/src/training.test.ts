@@ -699,16 +699,16 @@ describe('export d’un lot', () => {
       service.scoreItem(item.id, 0.6);
     }
 
-    const result = service.buildDataset({ format: 'atropos', batchId: batch.id });
+    const result = await service.buildDataset({ format: 'atropos', batchId: batch.id });
     expect(result.lines).toHaveLength(2);
     const parsed = JSON.parse(result.lines[0]!) as { score: number; metadata: { agent: string } };
     expect(parsed.score).toBeCloseTo(0.6);
     expect(parsed.metadata.agent).toBe('a1');
   });
 
-  it('retombe sur le dialecte par défaut si celui demandé est inconnu', () => {
+  it('retombe sur le dialecte par défaut si celui demandé est inconnu', async () => {
     const { service } = setup(['a1']);
-    const result = service.buildDataset({
+    const result = await service.buildDataset({
       format: 'sharegpt',
       runIds: [],
       dialect: 'inconnu' as never,
@@ -726,9 +726,9 @@ describe('export d’un lot', () => {
    * identifiant orphelin. L'écart doit apparaître dans l'aperçu, sans quoi le
    * jeu de données est plus petit que le lot sans explication.
    */
-  it('rapporte les runs disparus au lieu de les ignorer', () => {
+  it('rapporte les runs disparus au lieu de les ignorer', async () => {
     const { service } = setup(['a1']);
-    const result = service.buildDataset({ format: 'sharegpt', runIds: ['run_disparu'] });
+    const result = await service.buildDataset({ format: 'sharegpt', runIds: ['run_disparu'] });
     expect(result.lines).toHaveLength(0);
     expect(result.preview.skipped).toEqual([
       { runId: 'run_disparu', reason: 'run supprimé (agent effacé ?)' },
