@@ -31,6 +31,7 @@ import { RunEngine } from './runs.ts';
 import { Scheduler } from './scheduler.ts';
 import { SkillRegistry } from './skills.ts';
 import { DiscordBot } from './discord.ts';
+import { MaintenanceService } from './maintenance.ts';
 import { SlackBot } from './slack.ts';
 import { TelegramBot } from './telegram.ts';
 import { TmuxBridge } from './tmux.ts';
@@ -82,6 +83,7 @@ const engine = new RunEngine(
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
 const training = new TrainingService(store, bus, engine, agents);
+const maintenance = new MaintenanceService(store, bus, config);
 const telegram = new TelegramBot(config, store, bus, engine, agents, approvals);
 const discord = new DiscordBot(config, store, bus, engine, agents, approvals);
 const slack = new SlackBot(config, store, bus, engine, agents);
@@ -99,6 +101,12 @@ slack.start();
  * peut les remettre en file sans risquer de les compter deux fois.
  */
 training.resumeInterrupted();
+/*
+ * Entretien : un passage au démarrage, puis toutes les six heures. Sans
+ * rétention configurée il ne supprime rien — c'est un réglage qu'on active en
+ * connaissance de cause.
+ */
+maintenance.start();
 
 // ---------------------------------------------------------------------------
 // HTTP + WebSocket
@@ -128,16 +136,9 @@ await app.register(fastifyWebsocket);
 /*
  * Authentification : jeton requis sur /api/*, /mcp et /ws.
  *
- * Le jeton en paramètre de requête est réservé à /ws, et à lui seul. L'API des
- * navigateurs ne permet pas d'en-tête sur une connexion WebSocket, donc le
- * paramètre y est incontournable ; partout ailleurs il ne servait à rien et
- * faisait fuir le secret dans les journaux du serveur, ceux du reverse proxy et
- * l'historique du navigateur.
- */
-/*
- * La décision vit dans `auth.ts`, avec ses tests : elle était ici au milieu de
- * l'assemblage, où rien ne pouvait la vérifier, alors que c'est le seul rempart
- * entre l'extérieur et le lancement d'agents.
+ * La décision elle-même vit dans `auth.ts`, avec ses tests — elle était ici, au
+ * milieu de l'assemblage, où rien ne pouvait la vérifier, alors que c'est le
+ * seul rempart entre l'extérieur et le lancement d'agents.
  */
 app.addHook('onRequest', async (req, reply) => {
   const outcome = authorize(
@@ -194,6 +195,7 @@ registerRoutes(app, {
   scheduler,
   pipelines,
   training,
+  maintenance,
   metrics,
   connectors,
   plugins: pluginService,
@@ -248,6 +250,7 @@ const shutdown = async (): Promise<void> => {
   // Avant l'arrêt du moteur : les lots cessent de dépiler, et restent marqués
   // « running » pour reprendre au prochain démarrage.
   training.shutdown();
+  maintenance.stop();
   engine.shutdown();
   await app.close();
   store.close();

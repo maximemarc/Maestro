@@ -690,6 +690,16 @@ export interface Settings {
    * réglage lève la limite au prix d'une base plus volumineuse.
    */
   fullTrajectoryCapture: boolean;
+  /**
+   * Rétention des événements de runs et du journal, en jours.
+   *
+   * `null` ou 0 = conservation illimitée, le comportement historique. Rien ne
+   * purgeait ces deux tables, ce qui restait indolore sur quelques dizaines de
+   * runs — mais un lot d'entraînement de mille échantillons avec capture
+   * intégrale écrit des centaines de mégaoctets, et la base ne rend jamais
+   * l'espace d'elle-même.
+   */
+  retentionDays: number | null;
 }
 
 export interface ServerInfo {

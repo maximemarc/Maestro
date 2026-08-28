@@ -5,8 +5,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { Settings, TmuxSessionInfo } from '@maestro/shared';
-import { api } from '../lib/api';
-import { fmtDateTime } from '../lib/format';
+import { api, type MaintenanceState } from '../lib/api';
+import { fmtBytes, fmtDateTime } from '../lib/format';
 import { useStore } from '../lib/store';
 import { Desktop, PuzzlePiece } from '@phosphor-icons/react';
 import {
@@ -15,7 +15,7 @@ import {
   requestApprovalNotifications,
   setNotifyApprovals,
 } from '../lib/prefs';
-import { ConfirmButton, EmptyState, Field, LoadingBlock } from '../components/ui';
+import { ConfirmButton, EmptyState, ErrorText, Field, LoadingBlock } from '../components/ui';
 
 export default function SettingsPage() {
   const server = useStore((s) => s.server);
@@ -248,12 +248,34 @@ export default function SettingsPage() {
                 que ce navigateur, et n'est pas transmise au serveur.
                 {notifyDenied && ' Le navigateur a refusé les notifications pour ce site.'}
               </p>
+              <Field
+                label="Rétention des transcripts (jours)"
+                hint="Vide = illimité. Les événements des runs terminés et le journal sont purgés au-delà ; un run en cours n'est jamais amputé."
+              >
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={settings.retentionDays ?? ''}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      retentionDays: e.target.value ? Number(e.target.value) : null,
+                    })
+                  }
+                  placeholder="illimité"
+                />
+              </Field>
+
               <div className="row">
                 <button className="btn primary" onClick={saveSettings} disabled={saving}>
                   {saving ? 'Enregistrement…' : 'Enregistrer'}
                 </button>
                 {saved && <span className="text-ok">Paramètres enregistrés.</span>}
               </div>
+
+              <MaintenancePanel />
             </>
           )}
         </div>
@@ -375,6 +397,87 @@ export default function SettingsPage() {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Entretien de la base.
+ *
+ * Sa place est ici, juste sous la rétention : le réglage se prend sur un chiffre
+ * — la taille réelle de la base — et non dans le vide. Purger était jusqu'ici
+ * impossible, et sauvegarder se faisait à la main.
+ */
+function MaintenancePanel() {
+  const notify = useStore((s) => s.notify);
+  const [state, setState] = useState<MaintenanceState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api
+      .getMaintenance()
+      .then(setState)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(load, [load]);
+
+  const act = async (what: 'backup' | 'prune') => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (what === 'backup') {
+        const report = await api.runBackup();
+        notify(`Sauvegarde écrite (${fmtBytes(report.bytes)}).`);
+      } else {
+        const report = await api.runPrune();
+        notify(
+          report.applied
+            ? `${report.deletedEvents} événement(s) purgé(s), ${fmtBytes(report.bytesBefore - report.bytesAfter)} rendus.`
+            : 'Aucune rétention configurée : rien n’a été purgé.',
+        );
+      }
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4">
+      <div className="section-label">Entretien</div>
+      {error && <ErrorText>{error}</ErrorText>}
+
+      <dl className="kv">
+        <dt>Taille de la base</dt>
+        <dd>{state ? fmtBytes(state.databaseBytes) : '…'}</dd>
+        <dt>Rétention en vigueur</dt>
+        <dd>{state?.retentionDays ? `${state.retentionDays} jours` : 'illimitée'}</dd>
+        <dt>Sauvegardes</dt>
+        <dd>
+          {state?.backups.length
+            ? `${state.backups.length} — la plus récente le ${fmtDateTime(state.backups[0]?.createdAt ?? null)}`
+            : 'aucune'}
+        </dd>
+      </dl>
+
+      <div className="row gap-2 mt-2">
+        <button className="btn" onClick={() => void act('backup')} disabled={busy}>
+          Sauvegarder maintenant
+        </button>
+        <button className="btn ghost" onClick={() => void act('prune')} disabled={busy}>
+          Purger selon la rétention
+        </button>
+      </div>
+      <p className="text-faint text-xs mt-2">
+        La sauvegarde est écrite dans <code>&lt;données&gt;/backups</code>, à chaud, et les sept
+        plus récentes sont conservées. 🔒 Elle contient tout — transcripts, approbations,
+        configuration des serveurs MCP et leurs clés : elle mérite les mêmes précautions que la base
+        elle-même.
+      </p>
     </div>
   );
 }

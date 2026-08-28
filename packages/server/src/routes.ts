@@ -39,6 +39,7 @@ import {
   commitToBranch,
   patch as gitPatch,
 } from './workspace-git.ts';
+import type { MaintenanceService } from './maintenance.ts';
 import { DEFAULT_SPEC, TrainingError, type TrainingService } from './training.ts';
 import { toJsonl } from './training-export.ts';
 import { TOOL_CALL_DIALECTS, listDialects } from './training-parsers.ts';
@@ -56,6 +57,7 @@ export interface Services {
   scheduler: Scheduler;
   pipelines: PipelineService;
   training: TrainingService;
+  maintenance: MaintenanceService;
   metrics: Metrics;
   connectors: ConnectorRegistry;
   plugins: PluginService;
@@ -376,6 +378,7 @@ const settingsSchema = z.object({
   approvalTimeoutSec: z.number().int().min(30).max(86400).optional(),
   maxConcurrentRuns: z.number().int().min(1).max(32).optional(),
   maxAgentDepth: z.number().int().min(0).max(5).optional(),
+  retentionDays: z.number().int().min(1).max(3650).nullable().optional(),
   fullTrajectoryCapture: z.boolean().optional(),
 });
 
@@ -1029,6 +1032,30 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     if (!s.pipelines.cancelRun(id))
       return reply.code(409).send({ error: 'Exécution non annulable' });
     return { ok: true };
+  });
+
+  // -- Entretien de la base ----------------------------------------------------------------------
+
+  /** État : taille de la base, rétention en vigueur, sauvegardes disponibles. */
+  app.get('/api/maintenance', async () => ({
+    databaseBytes: s.store.databaseBytes(),
+    retentionDays: s.store.getSettings().retentionDays,
+    backups: s.maintenance.listBackups(),
+  }));
+
+  app.post('/api/maintenance/prune', async () => s.maintenance.prune());
+
+  app.post('/api/maintenance/backup', async (_req, reply) => {
+    try {
+      reply.code(201);
+      return s.maintenance.backup();
+    } catch (err) {
+      // Disque plein ou répertoire non inscriptible : le dire, plutôt qu'une
+      // trace de pile qui ne mentionne pas la sauvegarde.
+      return reply.code(500).send({
+        error: `Sauvegarde impossible : ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
   });
 
   // -- Entraînement (MLOps) --------------------------------------------------------------------

@@ -333,6 +333,15 @@ const DEFAULT_SETTINGS: Settings = {
   maxConcurrentRuns: 4,
   maxAgentDepth: 2,
   fullTrajectoryCapture: false,
+  /*
+   * Rétention illimitée par défaut.
+   *
+   * Une purge automatique sur une base existante détruirait des transcripts que
+   * personne n'a demandé à perdre. C'est un réglage qu'on active en connaissance
+   * de cause ; l'interface indique la taille de la base pour que la décision se
+   * prenne sur un chiffre.
+   */
+  retentionDays: null,
 };
 
 // -- helpers de (dé)sérialisation ------------------------------------------
@@ -1923,6 +1932,69 @@ export class Store {
       status: 'expired' as const,
       resolvedBy: 'timeout' as const,
     }));
+  }
+
+  // -- Maintenance ----------------------------------------------------------
+
+  /**
+   * Purge les événements des runs terminés avant une date.
+   *
+   * Par `ended_at` du run et non par horodatage de l'événement : un run long
+   * démarré il y a trois mois et encore actif garderait sinon ses premiers
+   * événements effacés sous ses pieds, et son transcript deviendrait un trou.
+   * Les runs en cours ne sont jamais touchés.
+   */
+  pruneRunEvents(endedBeforeIso: string): number {
+    const res = this.db
+      .prepare(
+        `DELETE FROM run_events WHERE run_id IN (
+           SELECT id FROM runs WHERE ended_at IS NOT NULL AND ended_at < ?
+         )`,
+      )
+      .run(endedBeforeIso);
+    return Number(res.changes);
+  }
+
+  /** Purge le journal applicatif par âge. */
+  pruneLogs(beforeIso: string): number {
+    const res = this.db.prepare('DELETE FROM logs WHERE ts < ?').run(beforeIso);
+    return Number(res.changes);
+  }
+
+  /** Taille du fichier de base, en octets, telle que SQLite la voit. */
+  databaseBytes(): number {
+    const row = this.db
+      .prepare(
+        'SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()',
+      )
+      .get() as SqlRow | undefined;
+    return row ? num(row.bytes) : 0;
+  }
+
+  /**
+   * Compacte le fichier après une purge.
+   *
+   * SQLite ne rend pas l'espace au système : sans cela, purger un gigaoctet
+   * d'événements laisse le fichier à sa taille d'avant, et la purge paraît sans
+   * effet. `VACUUM` réécrit la base, il n'est donc lancé qu'après une purge qui
+   * a réellement supprimé quelque chose.
+   */
+  vacuum(): void {
+    this.db.exec('VACUUM');
+  }
+
+  /**
+   * Sauvegarde à chaud vers un fichier.
+   *
+   * `VACUUM INTO` produit une copie cohérente et compactée sans interrompre les
+   * écritures en cours — contrairement à une copie du fichier, qui attrape un
+   * état intermédiaire quand le journal WAL n'est pas replié.
+   */
+  backupTo(path: string): void {
+    // Le chemin est construit par le serveur, jamais reçu d'un client ; le
+    // doublement des apostrophes protège malgré tout d'un répertoire de données
+    // au nom exotique.
+    this.db.exec(`VACUUM INTO '${path.replaceAll("'", "''")}'`);
   }
 
   // -- Lots d'entraînement --------------------------------------------------

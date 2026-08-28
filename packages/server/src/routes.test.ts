@@ -21,6 +21,7 @@ import { Bus } from './bus.ts';
 import type { MaestroConfig } from './config.ts';
 import { Store } from './db.ts';
 import { TaskService } from './kanban.ts';
+import { MaintenanceService } from './maintenance.ts';
 import { registerRoutes, type Services } from './routes.ts';
 import { SkillRegistry } from './skills.ts';
 import { TrainingService } from './training.ts';
@@ -78,6 +79,7 @@ beforeEach(async () => {
   } as unknown as RunEngine;
 
   const training = new TrainingService(store, bus, engine, agents);
+  const maintenance = new MaintenanceService(store, bus, config);
 
   app = Fastify({ logger: false });
   registerRoutes(app, {
@@ -89,6 +91,7 @@ beforeEach(async () => {
     tasks,
     engine,
     training,
+    maintenance,
     // Services non sollicités par les routes testées : un double vide suffit,
     // et une méthode manquante ferait échouer le test de façon lisible.
     approvals: {} as Services['approvals'],

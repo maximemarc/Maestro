@@ -12,6 +12,7 @@
   },
   "scripts": {
     "setup": "node scripts/setup.mjs",
+    "backup": "node scripts/backup.mjs",
     "dev": "npm-run-all --parallel dev:server dev:web",
     "dev:server": "npm run dev -w @maestro/server",
     "dev:web": "npm run dev -w @maestro/web",

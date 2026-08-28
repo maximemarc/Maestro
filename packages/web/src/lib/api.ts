@@ -136,6 +136,28 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T;
 }
 
+/** État de l'entretien : taille de la base, rétention, sauvegardes. */
+export interface MaintenanceState {
+  databaseBytes: number;
+  retentionDays: number | null;
+  backups: Array<{ name: string; bytes: number; createdAt: string }>;
+}
+
+export interface BackupReport {
+  path: string;
+  bytes: number;
+  rotated: string[];
+}
+
+export interface PruneReport {
+  applied: boolean;
+  cutoff: string | null;
+  deletedEvents: number;
+  deletedLogs: number;
+  bytesBefore: number;
+  bytesAfter: number;
+}
+
 /** Corps accepté par l'API pour créer ou modifier un lot d'entraînement. */
 export interface TrainingBatchInput {
   name: string;
@@ -409,6 +431,11 @@ export const api = {
   agentStats: () => request<AgentStats[]>('GET', '/api/metrics/agents'),
   tokensBy: (groupBy: 'day' | 'agent' | 'model', days = 30) =>
     request<TokensByBucket[]>('GET', `/api/metrics/tokens?groupBy=${groupBy}&days=${days}`),
+
+  // Entretien de la base
+  getMaintenance: () => request<MaintenanceState>('GET', '/api/maintenance'),
+  runBackup: () => request<BackupReport>('POST', '/api/maintenance/backup'),
+  runPrune: () => request<PruneReport>('POST', '/api/maintenance/prune'),
 
   // Catalogue MCP
   listMcpPresets: () => request<McpPreset[]>('GET', '/api/mcp-presets'),
