@@ -84,6 +84,17 @@ approbations d'outils, tokens et coûts.
 - Éditeur intégré ; matérialisation automatique au format natif Claude Code
   (`.claude/skills/<slug>/SKILL.md`) dans le workspace de chaque agent
 - « Utiliser » : lance un run agent + skill + demande
+- **Les agents écrivent leurs propres skills** via l'outil MCP `skill_save` :
+  une méthode non triviale trouvée pendant un run est consignée et disponible au
+  suivant. La mémoire retenait un fait, rien ne retenait une démarche.
+  🔒 Portée agent uniquement — écrire une skill globale changerait le
+  comportement de tous les autres agents à leur insu ; la promotion reste un
+  geste humain
+- **Format ouvert dans les deux sens** : le `SKILL.md` de Maestro (frontmatter
+  `name` / `description` puis markdown) est celui de Claude Code et des hubs
+  communautaires. L'import depuis un dépôt distant existait ; l'export d'une
+  skill, pour la republier ailleurs, s'ajoute — y compris pour une skill écrite
+  par un agent
 
 ### MCP — serveurs déclarés et outils maison
 
@@ -485,7 +496,12 @@ packages/
 │   ├── training-trajectory.ts  Run → trajectoire canonique, compression
 │   ├── training-parsers.ts     11 dialectes d'appels d'outils (rendu + lecture)
 │   ├── training-export.ts      ShareGPT / OpenAI / Atropos / brut, en JSONL
+│   ├── sandbox.ts       Confinement par agent (bac à sable Claude Code)
+│   ├── mcp-presets.ts   Catalogue de serveurs MCP prêts à déclarer
+│   ├── chat-commands.ts Commandes de messagerie, communes aux trois canaux
 │   ├── telegram.ts      Bot long-polling (zéro dépendance)
+│   ├── discord.ts       Gateway WebSocket v10 (zéro dépendance)
+│   ├── slack.ts         Socket Mode (zéro dépendance)
 │   └── tmux.ts          Sessions attachables
 └── web/      React 19 · Vite · zustand · d3-force — thème « mission control »
 ```

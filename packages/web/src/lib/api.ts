@@ -176,6 +176,32 @@ export async function downloadTrainingExport(input: TrainingExportRequest): Prom
 }
 
 /**
+ * Télécharge une skill au format ouvert SKILL.md.
+ *
+ * Comme le patch d'un run : la réponse n'est pas du JSON et un `<a href>` nu
+ * n'emporterait pas l'en-tête d'authentification, le jeton vivant en
+ * localStorage et non en cookie.
+ */
+export async function downloadSkill(id: string): Promise<void> {
+  const res = await fetch(`/api/skills/export?id=${encodeURIComponent(id)}`, {
+    headers: { ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(res.status, data?.error ?? `Erreur HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  /* Le nom vient de l'identifiant, pas de l'en-tête : lire content-disposition
+     demanderait de le décoder à la main pour un gain nul. */
+  link.download = `${id.split(':').pop() ?? 'skill'}.md`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/**
  * Télécharge le patch d'un run.
  *
  * Hors de `request` et hors d'un simple lien : la réponse n'est pas du JSON, et

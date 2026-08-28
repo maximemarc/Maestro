@@ -739,6 +739,24 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
 
   app.get('/api/skills', async () => s.skills.list());
 
+  /**
+   * Export d'une skill au format ouvert SKILL.md.
+   *
+   * En `text/markdown` et en pièce jointe : le fichier est fait pour être
+   * republié tel quel — dans un dépôt, sur un hub communautaire — et non lu dans
+   * le navigateur.
+   */
+  app.get('/api/skills/export', async (req, reply) => {
+    const { id } = req.query as { id?: string };
+    if (!id) return reply.code(400).send({ error: 'Paramètre « id » requis' });
+    const exported = s.skills.exportSkill(id);
+    if (!exported) return reply.code(404).send({ error: 'Skill introuvable' });
+    reply
+      .header('content-type', 'text/markdown; charset=utf-8')
+      .header('content-disposition', `attachment; filename="${exported.filename}"`);
+    return exported.content;
+  });
+
   app.put('/api/skills', async (req) => {
     const input = parseOr400(skillUpsertSchema, req.body);
     return badRequestOn(() => s.skills.upsert(input));

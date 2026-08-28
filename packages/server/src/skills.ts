@@ -197,6 +197,28 @@ export class SkillRegistry {
     };
   }
 
+  /**
+   * Rend une skill sous sa forme portable, pour publication ailleurs.
+   *
+   * C'est le format ouvert `SKILL.md` — frontmatter `name` / `description` puis
+   * markdown — celui de Claude Code et des hubs communautaires. Maestro le
+   * produisait déjà pour matérialiser les skills dans les workspaces ; il ne
+   * savait pas le rendre à l'utilisateur. L'interopérabilité a deux sens : on
+   * importait depuis un dépôt distant sans pouvoir republier.
+   *
+   * Fonctionne sur toutes les portées, y compris les intégrées et les natives :
+   * exporter n'y touche pas, et c'est justement d'une skill livrée qu'on part le
+   * plus souvent pour en écrire une à soi.
+   */
+  exportSkill(id: string): { filename: string; content: string } | null {
+    const skill = this.get(id);
+    if (!skill) return null;
+    return {
+      filename: `${skill.slug}.md`,
+      content: serializeSkill(skill.name, skill.description, skill.content, skill.sourceUrl),
+    };
+  }
+
   remove(id: string): boolean {
     const skill = this.get(id);
     if (!skill) return false;
