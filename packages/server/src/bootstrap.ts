@@ -12,6 +12,7 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import { RUN_INTERRUPTED_BY_RESTART, type ServerEvent } from '@maestro/shared';
 import { AgentService } from './agents.ts';
+import { authorize, deniedBody } from './auth.ts';
 import { Bus } from './bus.ts';
 import { loadConfig } from './config.ts';
 import { ConnectorRegistry } from './connectors.ts';
@@ -133,34 +134,18 @@ await app.register(fastifyWebsocket);
  * faisait fuir le secret dans les journaux du serveur, ceux du reverse proxy et
  * l'historique du navigateur.
  */
-const isAuthorized = (
-  req: { headers: Record<string, unknown>; query: unknown },
-  allowQueryToken: boolean,
-): boolean => {
-  const header = req.headers['authorization'];
-  if (typeof header === 'string' && header === `Bearer ${config.authToken}`) return true;
-  if (!allowQueryToken) return false;
-  const token = (req.query as { token?: string } | undefined)?.token;
-  return token === config.authToken;
-};
-
+/*
+ * La décision vit dans `auth.ts`, avec ses tests : elle était ici au milieu de
+ * l'assemblage, où rien ne pouvait la vérifier, alors que c'est le seul rempart
+ * entre l'extérieur et le lancement d'agents.
+ */
 app.addHook('onRequest', async (req, reply) => {
-  const url = req.raw.url ?? '';
-  const isWebSocket = url.startsWith('/ws');
-  const isGateway = url.startsWith('/mcp');
-  if (!isWebSocket && !isGateway && !url.startsWith('/api/')) return;
-  if (url.startsWith('/api/health')) return;
-  if (isAuthorized(req, isWebSocket)) return;
-  // Un client MCP ne sait lire qu'une enveloppe JSON-RPC : lui répondre dans sa
-  // langue lui permet d'afficher la cause au lieu d'un « erreur inconnue ».
-  if (isGateway) {
-    return reply.code(401).send({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: 'Jeton invalide ou manquant' },
-      id: null,
-    });
-  }
-  return reply.code(401).send({ error: 'Jeton invalide ou manquant' });
+  const outcome = authorize(
+    { url: req.raw.url ?? '', headers: req.headers, query: req.query },
+    config.authToken,
+  );
+  if (outcome.kind !== 'denied') return;
+  return reply.code(401).send(deniedBody(outcome.shape));
 });
 
 app.register(async (scope) => {

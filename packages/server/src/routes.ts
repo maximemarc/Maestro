@@ -170,7 +170,12 @@ const ragSearchSchema = z.object({
 });
 
 const agentBaseSchema = z.object({
-  name: z.string().min(1).max(60),
+  /*
+   * Rogné avant contrôle : `min(1)` seul laissait passer un nom fait d'espaces.
+   * Un agent nommé « ␣␣␣ » est inutilisable — invisible dans l'interface, et
+   * introuvable par `/run <agent>`, qui résout par le nom.
+   */
+  name: z.string().trim().min(1).max(60),
   emoji: z.string().min(1).max(8).default('🤖'),
   description: z.string().max(500).default(''),
   model: z.string().min(1).max(80).default('sonnet'),
