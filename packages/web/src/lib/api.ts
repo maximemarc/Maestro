@@ -45,6 +45,13 @@ import type {
   StartRunRequest,
   TmuxSessionInfo,
   TokensByBucket,
+  ToolCallDialectInfo,
+  Trajectory,
+  TrainingBatch,
+  TrainingBatchSpec,
+  TrainingExportPreview,
+  TrainingExportRequest,
+  TrainingItem,
   UpsertSkillRequest,
 } from '@maestro/shared';
 
@@ -126,6 +133,45 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(res.status, data?.error ?? `Erreur HTTP ${res.status}`);
   }
   return data as T;
+}
+
+/** Corps accepté par l'API pour créer ou modifier un lot d'entraînement. */
+export interface TrainingBatchInput {
+  name: string;
+  description?: string;
+  spec: TrainingBatchSpec;
+}
+
+/**
+ * Télécharge un jeu de données au format JSONL.
+ *
+ * Comme le patch d'un run : la réponse n'est pas du JSON, et un `<a href>`
+ * n'emporterait pas l'en-tête d'authentification. D'où le POST puis le Blob.
+ */
+export async function downloadTrainingExport(input: TrainingExportRequest): Promise<number> {
+  const res = await fetch('/api/training/export', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}),
+    },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(res.status, data?.error ?? `Erreur HTTP ${res.status}`);
+  }
+  const body = await res.text();
+  const blob = new Blob([body], { type: 'application/x-ndjson' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `maestro-${input.format}.jsonl`;
+  link.click();
+  URL.revokeObjectURL(url);
+  // Le nombre de lignes : sans lui, l'utilisateur ne sait pas si le fichier
+  // téléchargé contient mille trajectoires ou aucune.
+  return body ? body.trimEnd().split('\n').length : 0;
 }
 
 /**
@@ -336,6 +382,33 @@ export const api = {
   agentStats: () => request<AgentStats[]>('GET', '/api/metrics/agents'),
   tokensBy: (groupBy: 'day' | 'agent' | 'model', days = 30) =>
     request<TokensByBucket[]>('GET', `/api/metrics/tokens?groupBy=${groupBy}&days=${days}`),
+
+  // Entraînement (MLOps)
+  listToolCallDialects: () => request<ToolCallDialectInfo[]>('GET', '/api/training/dialects'),
+  listTrainingBatches: () => request<TrainingBatch[]>('GET', '/api/training/batches'),
+  createTrainingBatch: (input: TrainingBatchInput) =>
+    request<TrainingBatch>('POST', '/api/training/batches', input),
+  updateTrainingBatch: (id: string, patch: Partial<TrainingBatchInput>) =>
+    request<TrainingBatch>('PATCH', `/api/training/batches/${id}`, patch),
+  deleteTrainingBatch: (id: string) =>
+    request<{ ok: boolean }>('DELETE', `/api/training/batches/${id}`),
+  getTrainingBatch: (id: string) =>
+    request<{ batch: TrainingBatch; items: TrainingItem[] }>('GET', `/api/training/batches/${id}`),
+  startTrainingBatch: (id: string) =>
+    request<TrainingBatch>('POST', `/api/training/batches/${id}/start`),
+  pauseTrainingBatch: (id: string) =>
+    request<{ ok: boolean }>('POST', `/api/training/batches/${id}/pause`),
+  cancelTrainingBatch: (id: string) =>
+    request<{ ok: boolean }>('POST', `/api/training/batches/${id}/cancel`),
+  scoreTrainingItem: (id: string, score: number) =>
+    request<TrainingItem>('POST', `/api/training/items/${id}/score`, { score }),
+  getTrajectory: (runId: string, thinking = false) =>
+    request<Trajectory>(
+      'GET',
+      `/api/training/runs/${runId}/trajectory${thinking ? '?thinking=1' : ''}`,
+    ),
+  previewTrainingExport: (input: TrainingExportRequest) =>
+    request<TrainingExportPreview>('POST', '/api/training/export/preview', input),
 
   // Paramètres
   getSettings: () => request<Settings>('GET', '/api/settings'),

@@ -31,6 +31,7 @@ import { Scheduler } from './scheduler.ts';
 import { SkillRegistry } from './skills.ts';
 import { TelegramBot } from './telegram.ts';
 import { TmuxBridge } from './tmux.ts';
+import { TrainingService } from './training.ts';
 import { nowIso } from './util.ts';
 
 const config = loadConfig();
@@ -77,6 +78,7 @@ const engine = new RunEngine(
 );
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
+const training = new TrainingService(store, bus, engine, agents);
 const telegram = new TelegramBot(config, store, bus, engine, agents, approvals);
 const connectors = new ConnectorRegistry();
 const radar = new SessionRadar(config, store, bus, agents);
@@ -84,6 +86,12 @@ const radar = new SessionRadar(config, store, bus, agents);
 skills.syncAllWorkspaces();
 scheduler.init();
 telegram.start();
+/*
+ * Après `failStaleActiveRuns` : les runs orphelins sont déjà clôturés, la
+ * reprise voit donc des échantillons dont le run est bel et bien terminé et
+ * peut les remettre en file sans risquer de les compter deux fois.
+ */
+training.resumeInterrupted();
 
 // ---------------------------------------------------------------------------
 // HTTP + WebSocket
@@ -194,6 +202,7 @@ registerRoutes(app, {
   engine,
   scheduler,
   pipelines,
+  training,
   metrics,
   connectors,
   plugins: pluginService,
@@ -243,6 +252,9 @@ const shutdown = async (): Promise<void> => {
   radar.stop();
   scheduler.shutdown();
   telegram.stop();
+  // Avant l'arrêt du moteur : les lots cessent de dépiler, et restent marqués
+  // « running » pour reprendre au prochain démarrage.
+  training.shutdown();
   engine.shutdown();
   await app.close();
   store.close();

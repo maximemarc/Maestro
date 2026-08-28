@@ -97,7 +97,15 @@ export interface AgentTemplate {
 // Runs (exécutions)
 // ---------------------------------------------------------------------------
 
-export type RunOrigin = 'manual' | 'routine' | 'kanban' | 'telegram' | 'pipeline' | 'agent';
+export type RunOrigin =
+  | 'manual'
+  | 'routine'
+  | 'kanban'
+  | 'telegram'
+  | 'pipeline'
+  | 'agent'
+  /** Échantillon d'un lot de génération de données d'entraînement. */
+  | 'training';
 
 export type RunStatus =
   'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled' | 'timeout';
@@ -624,6 +632,16 @@ export interface Settings {
   maxConcurrentRuns: number;
   /** Profondeur max de délégation agent→agent (anti-boucle). */
   maxAgentDepth: number;
+  /**
+   * Capture intégrale des retours d'outils et de la réflexion.
+   *
+   * Par défaut, un retour d'outil est raccourci à la capture : c'est un
+   * transcript qu'on lit à l'écran, pas une archive. Pour produire des données
+   * d'entraînement, ce raccourcissement est nuisible — un modèle entraîné sur
+   * des observations coupées apprend à s'arrêter au milieu d'un résultat. Le
+   * réglage lève la limite au prix d'une base plus volumineuse.
+   */
+  fullTrajectoryCapture: boolean;
 }
 
 export interface ServerInfo {
@@ -972,4 +990,233 @@ export interface CommitResult {
   branch: string;
   sha: string;
   files: number;
+}
+
+// ---------------------------------------------------------------------------
+// Données d'entraînement (MLOps)
+// ---------------------------------------------------------------------------
+
+/**
+ * Un tour de trajectoire : ce qu'un modèle doit apprendre à produire.
+ *
+ * Volontairement plus pauvre que le format d'un fournisseur : c'est la forme
+ * canonique interne, dont dérivent tous les exports. Elle ne connaît ni
+ * ShareGPT ni OpenAI — chaque export sait la lire, elle n'en connaît aucun.
+ */
+export type TrajectoryRole = 'system' | 'user' | 'assistant' | 'tool';
+
+export interface TrajectoryToolCall {
+  /** Identifiant du bloc `tool_use`, seul lien fiable vers son résultat. */
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+export interface TrajectoryTurn {
+  role: TrajectoryRole;
+  /** Texte du tour. Vide sur un tour assistant purement outil. */
+  content: string;
+  /** Contenu de réflexion, séparé du texte : la plupart des formats l'excluent. */
+  thinking?: string;
+  /** role = assistant. */
+  toolCalls?: TrajectoryToolCall[];
+  /** role = tool. */
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
+  /**
+   * Vrai si le contenu a été raccourci — à la capture ou à la compression.
+   * Un export silencieusement tronqué produit des données d'entraînement
+   * fausses : le modèle apprendrait à s'arrêter au milieu d'un résultat.
+   */
+  truncated?: boolean;
+}
+
+/** Trajectoire complète d'un run, prête à exporter. */
+export interface Trajectory {
+  runId: string;
+  agentId: string;
+  agentName: string;
+  model: string;
+  status: RunStatus;
+  turns: TrajectoryTurn[];
+  /** Outils réellement appelés, dans l'ordre de première apparition. */
+  toolsUsed: string[];
+  /** Estimation du poids en tokens de la trajectoire rendue. */
+  estimatedTokens: number;
+  usage: TokenUsage;
+  costUsd: number;
+  durationMs: number | null;
+  createdAt: string;
+}
+
+/** Compte rendu d'une compression : ce qui a été sacrifié, et pourquoi. */
+export interface TrajectoryCompression {
+  applied: boolean;
+  tokenBudget: number | null;
+  tokensBefore: number;
+  tokensAfter: number;
+  droppedThinkingTurns: number;
+  truncatedToolResults: number;
+  droppedTurns: number;
+}
+
+/**
+ * Format d'export.
+ *
+ * `sharegpt` : le format de fine-tuning le plus largement accepté (Axolotl,
+ * LLaMA-Factory, Unsloth). `openai` : messages + tool_calls natifs, pour un
+ * fine-tuning d'API. `atropos` : rollouts scorés pour l'apprentissage par
+ * renforcement. `raw` : la forme canonique, sans perte, pour outiller soi-même.
+ */
+export type TrainingExportFormat = 'sharegpt' | 'openai' | 'atropos' | 'raw';
+
+/** Nom d'un parseur d'appels d'outils — voir training-parsers.ts. */
+export type ToolCallDialect =
+  | 'hermes'
+  | 'openai'
+  | 'mistral'
+  | 'llama3_json'
+  | 'llama3_python_tag'
+  | 'pythonic'
+  | 'deepseek'
+  | 'command_r'
+  | 'granite'
+  | 'functionary'
+  | 'json_lines';
+
+export interface ToolCallDialectInfo {
+  id: ToolCallDialect;
+  label: string;
+  /** Familles de modèles qui attendent cette convention. */
+  families: string;
+  /** Exemple rendu, pour que l'UI montre ce qui sera écrit. */
+  sample: string;
+}
+
+export interface TrainingExportRequest {
+  format: TrainingExportFormat;
+  dialect?: ToolCallDialect;
+  /** Restreint aux runs d'un lot. Exclusif avec `runIds`. */
+  batchId?: string | null;
+  runIds?: string[];
+  /** Budget de tokens par trajectoire ; au-delà, compression. */
+  tokenBudget?: number | null;
+  /** Exclut les runs en échec — vrai par défaut. */
+  onlySucceeded?: boolean;
+  includeThinking?: boolean;
+  /** N'exporte que les trajectoires ayant appelé au moins un outil. */
+  requireToolCalls?: boolean;
+}
+
+/** Aperçu d'un export : de quoi décider avant d'écrire un fichier. */
+export interface TrainingExportPreview {
+  format: TrainingExportFormat;
+  dialect: ToolCallDialect;
+  /** Trajectoires retenues. */
+  count: number;
+  /** Trajectoires écartées, par motif. */
+  skipped: Array<{ runId: string; reason: string }>;
+  totalEstimatedTokens: number;
+  compression: TrajectoryCompression;
+  /** Les deux premières lignes du JSONL, telles qu'elles seront écrites. */
+  sample: string[];
+}
+
+// -- Lots de génération -----------------------------------------------------
+
+export type TrainingBatchStatus =
+  'draft' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelled';
+
+export type TrainingItemStatus =
+  'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled';
+
+/**
+ * Pondération d'un outil dans un lot.
+ *
+ * Le poids ne force rien — un modèle reste libre de ses appels. Il pilote la
+ * consigne injectée dans le prompt et le tirage des variantes, ce qui suffit à
+ * déséquilibrer volontairement un jeu de données (par ex. 70 % de lectures,
+ * 30 % d'écritures).
+ */
+export interface ToolWeight {
+  tool: string;
+  weight: number;
+}
+
+export interface TrainingBatchSpec {
+  /**
+   * Agents qui exécutent le lot.
+   *
+   * Plusieurs, et non un seul, parce qu'un agent n'exécute jamais deux runs à
+   * la fois : son workspace est unique. Le parallélisme réel d'un lot vaut donc
+   * min(workers, agents du pool).
+   */
+  agentIds: string[];
+  /** Gabarits de prompt. `{{var}}` est substitué depuis `variables`. */
+  promptTemplates: string[];
+  /** Jeux de valeurs tirés pour peupler les gabarits. */
+  variables: Record<string, string[]>;
+  /** Nombre d'échantillons à produire. */
+  samples: number;
+  /** Générations menées de front, bornée par la taille du pool d'agents. */
+  workers: number;
+  /** Tentatives par échantillon avant abandon. */
+  maxAttempts: number;
+  toolWeights: ToolWeight[];
+  /** Délai maximal par échantillon, en secondes. */
+  timeoutSec: number | null;
+  /** Skill jointe à chaque run du lot. */
+  skillId: string | null;
+  /**
+   * Notation automatique des trajectoires (récompense pour l'apprentissage
+   * par renforcement). Sans elle, un export Atropos n'a pas de score.
+   */
+  grader: TrainingGraderSpec | null;
+}
+
+export interface TrainingGraderSpec {
+  agentId: string;
+  /**
+   * Consigne du juge. `{{prompt}}` et `{{result}}` sont substitués. Le juge
+   * doit terminer sa réponse par un nombre entre 0 et 1.
+   */
+  promptTemplate: string;
+}
+
+export interface TrainingBatch {
+  id: string;
+  name: string;
+  description: string;
+  status: TrainingBatchStatus;
+  spec: TrainingBatchSpec;
+  /** Compteurs dérivés des items, calculés à la lecture. */
+  counts: Record<TrainingItemStatus, number>;
+  /** Nombre d'échantillons déjà engendrés — le point de reprise. */
+  checkpointIndex: number;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface TrainingItem {
+  id: string;
+  batchId: string;
+  index: number;
+  agentId: string;
+  prompt: string;
+  runId: string | null;
+  status: TrainingItemStatus;
+  attempts: number;
+  /** Récompense dans [0,1] — juge automatique ou notation humaine. */
+  score: number | null;
+  scoreSource: 'grader' | 'human' | null;
+  toolCallCount: number;
+  totalTokens: number;
+  costUsd: number;
+  error: string | null;
+  createdAt: string;
+  endedAt: string | null;
 }

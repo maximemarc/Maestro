@@ -24,6 +24,13 @@ import type { SkillRegistry } from './skills.ts';
 import { TmuxBridge } from './tmux.ts';
 import { makeId, nowIso, truncate } from './util.ts';
 
+/** Longueurs de capture d'un transcript destiné à la lecture. */
+const TOOL_RESULT_LIMIT = 1500;
+const THINKING_LIMIT = 2000;
+/** Et celles d'une capture destinée à l'entraînement (voir Settings). */
+const FULL_TOOL_RESULT_LIMIT = 60_000;
+const FULL_THINKING_LIMIT = 20_000;
+
 export interface StartRunInput {
   agentId: string;
   prompt: string;
@@ -499,6 +506,20 @@ export class RunEngine {
       env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'maestro/0.1.0' },
     };
 
+    /*
+     * Longueurs de capture.
+     *
+     * Le transcript sert d'abord à être lu à l'écran, d'où des retours d'outils
+     * raccourcis. Mais ces mêmes événements sont la matière première des
+     * trajectoires d'entraînement, et une observation coupée y devient une
+     * erreur d'étiquetage : le modèle apprend à s'arrêter au milieu d'un
+     * résultat. Le réglage lève donc la limite, sans la supprimer — une borne
+     * haute reste indispensable, un `find /` produit des mégaoctets.
+     */
+    const fullCapture = settings.fullTrajectoryCapture;
+    const toolResultLimit = fullCapture ? FULL_TOOL_RESULT_LIMIT : TOOL_RESULT_LIMIT;
+    const thinkingLimit = fullCapture ? FULL_THINKING_LIMIT : THINKING_LIMIT;
+
     let cumulatedTokens = 0;
     let gotResult = false;
 
@@ -528,7 +549,7 @@ export class RunEngine {
             if (block.type === 'text' && block.text.trim()) {
               this.emitEvent(run, 'assistant_text', { text: block.text });
             } else if (block.type === 'thinking' && block.thinking.trim()) {
-              this.emitEvent(run, 'thinking', { text: truncate(block.thinking, 2000) });
+              this.emitEvent(run, 'thinking', { text: truncate(block.thinking, thinkingLimit) });
             } else if (block.type === 'tool_use') {
               this.emitEvent(run, 'tool_use', {
                 toolName: block.name,
@@ -555,7 +576,7 @@ export class RunEngine {
                 this.emitEvent(run, 'tool_result', {
                   toolUseId: block.tool_use_id,
                   isError: block.is_error ?? false,
-                  text: truncate(textPart, 1500),
+                  text: truncate(textPart, toolResultLimit),
                 });
               }
             }

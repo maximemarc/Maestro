@@ -28,6 +28,10 @@ import type {
   Settings,
   AgentStats,
   TokensByBucket,
+  TrainingBatch,
+  TrainingBatchSpec,
+  TrainingItem,
+  TrainingItemStatus,
 } from '@maestro/shared';
 import { makeId, nowIso, safeJsonParse } from './util.ts';
 
@@ -270,6 +274,52 @@ CREATE VIRTUAL TABLE IF NOT EXISTS rag_fts USING fts5(
   tokenize='unicode61 remove_diacritics 2'
 );
 
+CREATE TABLE IF NOT EXISTS training_batches (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft',
+  spec TEXT NOT NULL DEFAULT '{}',
+  checkpoint_index INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  ended_at TEXT
+);
+
+/*
+ * Un échantillon du lot, et son point de reprise.
+ *
+ * La colonne s'appelle « idx » et non « index » : le mot est réservé en SQL, et
+ * le devis d'identifiant qu'il faudrait sinon poser à chaque requête est une
+ * source d'erreur permanente pour un gain nul.
+ *
+ * Chaque ligne est son propre checkpoint : l'état d'un échantillon est écrit
+ * dès qu'il change, jamais à la fin du lot. Un arrêt brutal au millième
+ * échantillon ne coûte donc que celui-là.
+ */
+CREATE TABLE IF NOT EXISTS training_items (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES training_batches(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  agent_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  run_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  score REAL,
+  score_source TEXT,
+  tool_call_count INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_training_items_batch ON training_items(batch_id, idx);
+CREATE INDEX IF NOT EXISTS idx_training_items_status ON training_items(batch_id, status);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -282,6 +332,7 @@ const DEFAULT_SETTINGS: Settings = {
   approvalTimeoutSec: 900,
   maxConcurrentRuns: 4,
   maxAgentDepth: 2,
+  fullTrajectoryCapture: false,
 };
 
 // -- helpers de (dé)sérialisation ------------------------------------------
@@ -1859,6 +1910,258 @@ export class Store {
       resolvedBy: 'timeout' as const,
     }));
   }
+
+  // -- Lots d'entraînement --------------------------------------------------
+
+  /**
+   * Compteurs par statut, calculés en base.
+   *
+   * Les tenir dans une colonne du lot aurait exigé de les maintenir à chaque
+   * transition d'échantillon, avec le risque de dérive que cela suppose. Un
+   * GROUP BY sur un index les rend exacts par construction.
+   */
+  private trainingCounts(batchId: string): Record<TrainingItemStatus, number> {
+    const counts: Record<TrainingItemStatus, number> = {
+      pending: 0,
+      running: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      cancelled: 0,
+    };
+    const rows = this.db
+      .prepare(
+        'SELECT status, COUNT(*) AS n FROM training_items WHERE batch_id = ? GROUP BY status',
+      )
+      .all(batchId) as SqlRow[];
+    for (const row of rows) {
+      const status = str(row.status) as TrainingItemStatus;
+      if (status in counts) counts[status] = num(row.n);
+    }
+    return counts;
+  }
+
+  private rowToTrainingBatch(r: SqlRow): TrainingBatch {
+    const id = str(r.id);
+    return {
+      id,
+      name: str(r.name),
+      description: str(r.description),
+      status: str(r.status) as TrainingBatch['status'],
+      spec: safeJsonParse<TrainingBatchSpec>(str(r.spec ?? '{}'), {
+        agentIds: [],
+        promptTemplates: [],
+        variables: {},
+        samples: 0,
+        workers: 1,
+        maxAttempts: 1,
+        toolWeights: [],
+        timeoutSec: null,
+        skillId: null,
+        grader: null,
+      }),
+      counts: this.trainingCounts(id),
+      checkpointIndex: num(r.checkpoint_index),
+      error: strOrNull(r.error),
+      createdAt: str(r.created_at),
+      updatedAt: str(r.updated_at),
+      startedAt: strOrNull(r.started_at),
+      endedAt: strOrNull(r.ended_at),
+    };
+  }
+
+  listTrainingBatches(): TrainingBatch[] {
+    const rows = this.db
+      .prepare('SELECT * FROM training_batches ORDER BY created_at DESC')
+      .all() as SqlRow[];
+    return rows.map((r) => this.rowToTrainingBatch(r));
+  }
+
+  getTrainingBatch(id: string): TrainingBatch | null {
+    const row = this.db.prepare('SELECT * FROM training_batches WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? this.rowToTrainingBatch(row) : null;
+  }
+
+  insertTrainingBatch(batch: TrainingBatch): void {
+    this.db
+      .prepare(
+        `INSERT INTO training_batches (id, name, description, status, spec, checkpoint_index,
+          error, created_at, updated_at, started_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        batch.id,
+        batch.name,
+        batch.description,
+        batch.status,
+        JSON.stringify(batch.spec),
+        batch.checkpointIndex,
+        batch.error,
+        batch.createdAt,
+        batch.updatedAt,
+        batch.startedAt,
+        batch.endedAt,
+      );
+  }
+
+  updateTrainingBatch(batch: TrainingBatch): void {
+    this.db
+      .prepare(
+        `UPDATE training_batches SET name=?, description=?, status=?, spec=?, checkpoint_index=?,
+          error=?, updated_at=?, started_at=?, ended_at=? WHERE id=?`,
+      )
+      .run(
+        batch.name,
+        batch.description,
+        batch.status,
+        JSON.stringify(batch.spec),
+        batch.checkpointIndex,
+        batch.error,
+        batch.updatedAt,
+        batch.startedAt,
+        batch.endedAt,
+        batch.id,
+      );
+  }
+
+  deleteTrainingBatch(id: string): boolean {
+    if (!this.getTrainingBatch(id)) return false;
+    this.db.prepare('DELETE FROM training_items WHERE batch_id = ?').run(id);
+    this.db.prepare('DELETE FROM training_batches WHERE id = ?').run(id);
+    return true;
+  }
+
+  insertTrainingItems(items: TrainingItem[]): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO training_items (id, batch_id, idx, agent_id, prompt, run_id, status, attempts,
+        score, score_source, tool_call_count, total_tokens, cost_usd, error, created_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const item of items) {
+      stmt.run(
+        item.id,
+        item.batchId,
+        item.index,
+        item.agentId,
+        item.prompt,
+        item.runId,
+        item.status,
+        item.attempts,
+        item.score,
+        item.scoreSource,
+        item.toolCallCount,
+        item.totalTokens,
+        item.costUsd,
+        item.error,
+        item.createdAt,
+        item.endedAt,
+      );
+    }
+  }
+
+  updateTrainingItem(item: TrainingItem): void {
+    this.db
+      .prepare(
+        `UPDATE training_items SET agent_id=?, prompt=?, run_id=?, status=?, attempts=?, score=?,
+          score_source=?, tool_call_count=?, total_tokens=?, cost_usd=?, error=?, ended_at=?
+         WHERE id=?`,
+      )
+      .run(
+        item.agentId,
+        item.prompt,
+        item.runId,
+        item.status,
+        item.attempts,
+        item.score,
+        item.scoreSource,
+        item.toolCallCount,
+        item.totalTokens,
+        item.costUsd,
+        item.error,
+        item.endedAt,
+        item.id,
+      );
+  }
+
+  listTrainingItems(batchId: string, limit = 2000): TrainingItem[] {
+    const rows = this.db
+      .prepare('SELECT * FROM training_items WHERE batch_id = ? ORDER BY idx LIMIT ?')
+      .all(batchId, limit) as SqlRow[];
+    return rows.map(rowToTrainingItem);
+  }
+
+  getTrainingItem(id: string): TrainingItem | null {
+    const row = this.db.prepare('SELECT * FROM training_items WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? rowToTrainingItem(row) : null;
+  }
+
+  /** Échantillons encore à faire, dans l'ordre, pour alimenter les workers. */
+  listPendingTrainingItems(batchId: string, limit: number): TrainingItem[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM training_items WHERE batch_id = ? AND status = 'pending' ORDER BY idx LIMIT ?",
+      )
+      .all(batchId, limit) as SqlRow[];
+    return rows.map(rowToTrainingItem);
+  }
+
+  /**
+   * Remet en attente les échantillons restés « running ».
+   *
+   * Appelé au démarrage : le processus qui les portait est mort, leur run est
+   * clôturé par `failStaleActiveRuns`, et personne ne viendra plus les
+   * terminer. Sans cette remise à zéro, une reprise de lot les compterait
+   * indéfiniment comme en cours.
+   */
+  resetRunningTrainingItems(): number {
+    const res = this.db
+      .prepare(
+        "UPDATE training_items SET status='pending', run_id=NULL, ended_at=NULL WHERE status='running'",
+      )
+      .run();
+    return Number(res.changes);
+  }
+
+  /** Runs et scores d'un lot, dans l'ordre — matière première de l'export. */
+  listTrainingRunRefs(batchId: string): Array<{ runId: string; score: number | null }> {
+    const rows = this.db
+      .prepare(
+        'SELECT run_id, score FROM training_items WHERE batch_id = ? AND run_id IS NOT NULL ORDER BY idx',
+      )
+      .all(batchId) as SqlRow[];
+    return rows.map((r) => ({ runId: str(r.run_id), score: numOrNull(r.score) }));
+  }
+
+  /** Score déjà attribué à un run, s'il appartient à un lot noté. */
+  scoreForRun(runId: string): number | null {
+    const row = this.db
+      .prepare('SELECT score FROM training_items WHERE run_id = ? AND score IS NOT NULL LIMIT 1')
+      .get(runId) as SqlRow | undefined;
+    return row ? numOrNull(row.score) : null;
+  }
+}
+
+function rowToTrainingItem(r: SqlRow): TrainingItem {
+  return {
+    id: str(r.id),
+    batchId: str(r.batch_id),
+    index: num(r.idx),
+    agentId: str(r.agent_id),
+    prompt: str(r.prompt),
+    runId: strOrNull(r.run_id),
+    status: str(r.status) as TrainingItemStatus,
+    attempts: num(r.attempts),
+    score: numOrNull(r.score),
+    scoreSource: strOrNull(r.score_source) as TrainingItem['scoreSource'],
+    toolCallCount: num(r.tool_call_count),
+    totalTokens: num(r.total_tokens),
+    costUsd: num(r.cost_usd),
+    error: strOrNull(r.error),
+    createdAt: str(r.created_at),
+    endedAt: strOrNull(r.ended_at),
+  };
 }
 
 export function createTaskId(): string {

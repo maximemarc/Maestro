@@ -220,6 +220,24 @@ export default function SettingsPage() {
               <label className="checkbox-row mb-2">
                 <input
                   type="checkbox"
+                  checked={settings.fullTrajectoryCapture}
+                  onChange={(e) =>
+                    setSettings({ ...settings, fullTrajectoryCapture: e.target.checked })
+                  }
+                />
+                Capture intégrale des retours d'outils
+              </label>
+              <p className="text-faint text-xs mb-3">
+                Par défaut, un retour d'outil est raccourci à 1 500 caractères : le transcript est
+                fait pour être lu. Pour produire des données d'entraînement, ce raccourci devient
+                une erreur d'étiquetage — le modèle apprend à s'arrêter au milieu d'un résultat. Le
+                réglage porte la limite à 60 000 caractères, au prix d'une base plus volumineuse, et
+                ne s'applique qu'aux runs suivants.
+              </p>
+
+              <label className="checkbox-row mb-2">
+                <input
+                  type="checkbox"
                   checked={notifyApprovals}
                   onChange={(e) => void toggleApprovalAlerts(e.target.checked)}
                 />

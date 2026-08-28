@@ -239,6 +239,61 @@ définir `VOYAGE_API_KEY` ou `OPENAI_API_KEY` dans l'environnement du serveur :
   `{{steps.<nom>}}`
 - Suivi d'exécution étape par étape, sortie de chaque étape consultable
 
+### Entraînement — jeux de données à partir du travail des agents
+
+Chaque run laisse derrière lui une suite d'événements : consigne, texte, appels
+d'outils, observations, réponse. C'est exactement la forme d'une trajectoire
+d'entraînement. Maestro sait donc les relire, en fabriquer en série, et les
+exporter au format d'un outil de fine-tuning.
+
+**Lots de génération**
+
+- Un lot décrit des gabarits de prompt (`{{variable}}` substitué), des jeux de
+  valeurs, un nombre d'échantillons et une **distribution d'outils** pondérée —
+  de quoi déséquilibrer volontairement un corpus (70 % de lectures, 30 %
+  d'écritures)
+- Le tirage est **reproductible** : la graine dérive de l'identifiant du lot et
+  de l'index de l'échantillon, donc relancer un lot ne change pas son plan
+- **Checkpointing par échantillon** : l'état est écrit à chaque transition, pas
+  à la fin. Un arrêt brutal au millième échantillon ne coûte que celui-là, et le
+  lot reprend seul au démarrage suivant
+- Pause, reprise, annulation, tentatives multiples par échantillon
+- ⚠️ Le parallélisme vient du **pool d'agents**, pas d'un nombre de workers : un
+  agent n'exécute jamais deux runs à la fois, son workspace est unique. Un lot
+  confié à quatre agents produit quatre trajectoires de front, pas davantage
+
+**Notation (récompense)**
+
+- Un **agent juge** facultatif note chaque trajectoire entre 0 et 1 ; la note
+  peut être corrigée à la main dans l'interface
+- Sans note, un export destiné au renforcement n'a aucun signal : les
+  trajectoires non notées sont écartées, en le disant
+
+**Export**
+
+- Formats : **ShareGPT** (Axolotl, LLaMA-Factory, Unsloth), **OpenAI**
+  (`messages` + `tool_calls` natifs), **Atropos** (rollouts scorés pour
+  l'apprentissage par renforcement), **brut** (la forme canonique, sans perte)
+- **Onze dialectes d'appels d'outils** — Hermes/ChatML, OpenAI, Mistral, Llama 3
+  (JSON et balise python), pythonic, DeepSeek, Command R, Granite, Functionary,
+  JSON par ligne. Exporter dans la mauvaise convention apprend au modèle une
+  syntaxe qu'il n'émettra jamais ; chaque dialecte est vérifié par un
+  aller-retour rendu → lecture
+- **Compression sous budget de tokens**, par ordre croissant de dégât : la
+  réflexion d'abord, puis les retours d'outils les plus longs, et seulement en
+  dernier recours des tours entiers — la première consigne et la réponse finale
+  ne sont jamais sacrifiées, et appels et observations restent appariés
+- Sortie en **JSONL**, une trajectoire par ligne. L'aperçu dit combien sont
+  retenues, lesquelles sont écartées et pourquoi, avant d'écrire un fichier
+- La source peut être un lot **ou les runs récents de l'instance** : le travail
+  réel fait souvent les meilleures trajectoires
+
+> ⚠️ Par défaut un retour d'outil est raccourci à 1 500 caractères — le
+> transcript est fait pour être lu. Pour de l'entraînement, ce raccourci devient
+> une erreur d'étiquetage. Le réglage **« Capture intégrale des retours
+> d'outils »** (Paramètres) porte la limite à 60 000 caractères, au prix d'une
+> base plus volumineuse, et ne s'applique qu'aux runs suivants.
+
 ### Délégation inter-agents
 
 - Outil MCP `maestro_send_to_agent` : un agent confie une sous-tâche à un autre
@@ -400,6 +455,10 @@ packages/
 │   ├── kanban.ts        Cartes + transitions automatiques liées aux runs
 │   ├── scheduler.ts     Routines cron (croner)
 │   ├── pipelines.ts     Chaînes d'agents séquentielles
+│   ├── training.ts      Lots de génération : workers, checkpoint, notation
+│   ├── training-trajectory.ts  Run → trajectoire canonique, compression
+│   ├── training-parsers.ts     11 dialectes d'appels d'outils (rendu + lecture)
+│   ├── training-export.ts      ShareGPT / OpenAI / Atropos / brut, en JSONL
 │   ├── telegram.ts      Bot long-polling (zéro dépendance)
 │   └── tmux.ts          Sessions attachables
 └── web/      React 19 · Vite · zustand · d3-force — thème « mission control »
