@@ -186,6 +186,22 @@ const agentBaseSchema = z.object({
   maxTurns: z.number().int().positive().max(500).nullable().default(null),
   timeoutSec: z.number().int().positive().max(86400).nullable().default(null),
   tokenBudget: z.number().int().positive().nullable().default(null),
+  /*
+   * Confinement, nul par défaut : ne rien dire vaut « comme avant ». Les listes
+   * de chemins et de domaines sont bornées — une liste sans limite finit dans
+   * une ligne de commande passée au bac à sable.
+   */
+  sandbox: z
+    .object({
+      enabled: z.boolean().default(false),
+      failIfUnavailable: z.boolean().default(false),
+      allowedDomains: z.array(z.string().min(1).max(253)).max(100).default([]),
+      strictAllowlist: z.boolean().default(true),
+      allowWrite: z.array(z.string().min(1).max(4096)).max(50).default([]),
+      denyRead: z.array(z.string().min(1).max(4096)).max(50).default([]),
+    })
+    .nullable()
+    .default(null),
   color: z
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
@@ -841,6 +857,7 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
         maxTurns: null,
         timeoutSec: null,
         tokenBudget: null,
+        sandbox: null,
         color: body.color ?? preview.agentDraft?.color ?? '#22d3ee',
         pinned: null,
         archived: false,

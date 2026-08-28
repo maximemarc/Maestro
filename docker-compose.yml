@@ -1,0 +1,76 @@
+# Exécution durcie de Maestro en conteneur — optionnelle.
+#
+# `docker compose up -d` et rien d'autre. Ce fichier n'est pas un prérequis :
+# Maestro s'exécute très bien sans, et le confinement par agent (bac à sable de
+# Claude Code) est indépendant de tout ceci. Ce qu'un conteneur apporte en plus,
+# c'est une frontière que l'agent ne peut pas raisonner : il ne voit ni le reste
+# du disque, ni les autres processus de la machine.
+
+services:
+  maestro:
+    build: .
+    image: maestro:local
+    container_name: maestro
+    restart: unless-stopped
+
+    ports:
+      # Sur 127.0.0.1 volontairement. Exposer 4520 sur toutes les interfaces
+      # publierait l'API — et donc le lancement d'agents — sur le réseau local.
+      # Pour un accès distant, un reverse proxy TLS devant, jamais ce port nu.
+      - '127.0.0.1:4520:4520'
+
+    environment:
+      MAESTRO_PORT: 4520
+      MAESTRO_DATA_DIR: /data
+      # Jeton : à définir dans un .env non versionné, ou laissé vide pour qu'un
+      # jeton soit engendré au premier démarrage et écrit dans /data/token.
+      MAESTRO_TOKEN: ${MAESTRO_TOKEN:-}
+      # Authentification du CLIENT Claude Code. Deux voies : une clé d'API, ou
+      # le montage de ~/.claude ci-dessous qui réutilise la session existante.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+    volumes:
+      # Données de Maestro : base, workspaces des agents, skills, jeton.
+      - maestro-data:/data
+      # Réutilise l'authentification Claude Code de la machine.
+      #
+      # En lecture-écriture, et non en lecture seule : le CLI met à jour ses
+      # propres fichiers de session. Le commenter si l'on préfère la clé d'API —
+      # c'est le montage qui donne le plus de surface au conteneur.
+      - ${HOME}/.claude:/home/node/.claude
+
+    # -- Durcissement ---------------------------------------------------------
+    #
+    # C'est ici que se joue « limiter les agents », pas dans l'image.
+
+    # Racine en lecture seule : un agent ne peut pas modifier le système du
+    # conteneur. Ce qui doit rester inscriptible l'est explicitement, ci-dessous.
+    read_only: true
+
+    tmpfs:
+      # Le SDK extrait le CLI Claude embarqué dans un répertoire temporaire au
+      # démarrage : sans /tmp inscriptible, aucune session ne démarre.
+      - /tmp:rw,noexec,nosuid,size=512m
+
+    cap_drop:
+      - ALL
+    security_opt:
+      # Interdit l'escalade par binaire setuid, y compris pour un processus que
+      # l'agent lancerait lui-même.
+      - no-new-privileges:true
+
+    # Plafonds. Un agent qui part en boucle consomme le conteneur, pas la
+    # machine — et un fork bomb se heurte à pids_limit.
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+
+    # Journalisation bornée : un run bavard ne remplit pas le disque.
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+volumes:
+  maestro-data:

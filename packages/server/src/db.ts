@@ -381,6 +381,10 @@ function rowToAgent(r: SqlRow): AgentConfig {
     maxTurns: numOrNull(r.max_turns),
     timeoutSec: numOrNull(r.timeout_sec),
     tokenBudget: numOrNull(r.token_budget),
+    sandbox:
+      r.sandbox === null || r.sandbox === undefined
+        ? null
+        : safeJsonParse<AgentConfig['sandbox']>(str(r.sandbox), null),
     color: str(r.color),
     pinned: r.pinned === null ? null : safeJsonParse(str(r.pinned), null),
     archived: bool(r.archived),
@@ -670,6 +674,14 @@ export class Store {
        * les anciens vecteurs en place, incomparables et silencieusement inutiles.
        */
       ['rag_chunks', 'embedding_model', 'ALTER TABLE rag_chunks ADD COLUMN embedding_model TEXT'],
+      /*
+       * Confinement de l'agent, en JSON, nul par défaut.
+       *
+       * Nul et non un objet désactivé : une base existante ne doit pas voir
+       * apparaître un bac à sable, même inactif, sur des agents créés avant
+       * qu'il existe. L'absence est le comportement historique, et elle se lit.
+       */
+      ['agents', 'sandbox', 'ALTER TABLE agents ADD COLUMN sandbox TEXT'],
     ];
     for (const [table, column, ddl] of added) {
       const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as SqlRow[];
@@ -709,8 +721,8 @@ export class Store {
         `INSERT INTO agents (id, name, emoji, description, model, engine, permission_mode,
           approval_policy, system_prompt, cli_agent, parent_agent_id, plugin_ids, mcp_server_ids, rag_collection_ids, workspace_dir,
           memory_enabled, allowed_tools, disallowed_tools, max_turns, timeout_sec, token_budget,
-          color, pinned, archived, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sandbox, color, pinned, archived, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         agent.id,
@@ -734,6 +746,7 @@ export class Store {
         agent.maxTurns,
         agent.timeoutSec,
         agent.tokenBudget,
+        agent.sandbox ? JSON.stringify(agent.sandbox) : null,
         agent.color,
         agent.pinned ? JSON.stringify(agent.pinned) : null,
         agent.archived ? 1 : 0,
@@ -749,7 +762,7 @@ export class Store {
           approval_policy=?, system_prompt=?, cli_agent=?, parent_agent_id=?, plugin_ids=?,
           mcp_server_ids=?, rag_collection_ids=?,
           workspace_dir=?, memory_enabled=?, allowed_tools=?,
-          disallowed_tools=?, max_turns=?, timeout_sec=?, token_budget=?, color=?, pinned=?,
+          disallowed_tools=?, max_turns=?, timeout_sec=?, token_budget=?, sandbox=?, color=?, pinned=?,
           archived=?, updated_at=? WHERE id=?`,
       )
       .run(
@@ -773,6 +786,7 @@ export class Store {
         agent.maxTurns,
         agent.timeoutSec,
         agent.tokenBudget,
+        agent.sandbox ? JSON.stringify(agent.sandbox) : null,
         agent.color,
         agent.pinned ? JSON.stringify(agent.pinned) : null,
         agent.archived ? 1 : 0,

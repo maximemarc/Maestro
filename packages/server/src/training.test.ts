@@ -36,6 +36,7 @@ function makeAgent(id: string, patch: Partial<AgentConfig> = {}): AgentConfig {
     maxTurns: null,
     timeoutSec: null,
     tokenBudget: null,
+    sandbox: null,
     color: '#fff',
     pinned: null,
     archived: false,

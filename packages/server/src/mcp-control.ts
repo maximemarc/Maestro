@@ -10,6 +10,7 @@ import type { AgentService } from './agents.ts';
 import type { Bus } from './bus.ts';
 import type { TaskService } from './kanban.ts';
 import type { RunEngine } from './runs.ts';
+import type { SkillRegistry } from './skills.ts';
 import { truncate } from './util.ts';
 
 export interface ControlDeps {
@@ -17,6 +18,8 @@ export interface ControlDeps {
   agents: AgentService;
   bus: Bus;
   engine: RunEngine;
+  /** Registre des skills — l'agent y consigne ses méthodes réutilisables. */
+  skills: SkillRegistry;
   maxAgentDepth: () => number;
 }
 
@@ -155,6 +158,67 @@ export function buildMaestroServer(deps: ControlDeps, ctx: RunContext) {
     },
   );
 
+  /*
+   * Capitalisation d'une solution en skill réutilisable.
+   *
+   * C'est ce qui distingue un agent qui refait le même chemin à chaque fois d'un
+   * agent qui apprend : la mémoire retient un fait, la skill retient une
+   * méthode. Sans cet outil, un agent pouvait écrire un fichier dans son
+   * workspace, mais rien ne le remontait au registre — la synchronisation ne va
+   * que du registre vers les workspaces, jamais l'inverse.
+   *
+   * 🔒 Portée agent, toujours. Laisser un agent écrire une skill globale lui
+   * donnerait le pouvoir de modifier le comportement de tous les autres, à leur
+   * insu et sans validation. La promotion en global reste un geste humain, dans
+   * l'interface.
+   */
+  const skillSave = tool(
+    'skill_save',
+    "Enregistrer une méthode réutilisable comme skill de cet agent, pour ne pas la redécouvrir à la prochaine tâche. À appeler quand un problème non trivial vient d'être résolu et que la démarche est généralisable. Jamais de secret ni de donnée personnelle dans le contenu.",
+    {
+      name: z.string().min(1).max(80),
+      description: z
+        .string()
+        .min(1)
+        .max(300)
+        .describe('Quand employer cette skill — c’est ce qui décide de son déclenchement.'),
+      content: z
+        .string()
+        .min(1)
+        .max(20000)
+        .describe('Le corps en markdown : démarche, pièges, exemples.'),
+      slug: z.string().max(80).optional(),
+    },
+    async (args) => {
+      try {
+        const skill = deps.skills.upsert({
+          scope: 'agent',
+          agentId: ctx.agent.id,
+          slug: args.slug ?? args.name,
+          name: args.name,
+          description: args.description,
+          content: args.content,
+        });
+        deps.bus.log(
+          'success',
+          'skills',
+          `${ctx.agent.name} a consigné la skill « ${skill.name} »`,
+          {
+            agentId: ctx.agent.id,
+            runId: ctx.runId,
+          },
+        );
+        return text(
+          `Skill « ${skill.name} » enregistrée (${skill.id}). Elle est disponible dès le prochain run de cet agent.`,
+        );
+      } catch (err) {
+        return error(
+          `Enregistrement impossible : ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    },
+  );
+
   const report = tool(
     'report',
     'Publier le résumé final structuré du travail effectué. À appeler une fois, en fin de tâche.',
@@ -174,6 +238,6 @@ export function buildMaestroServer(deps: ControlDeps, ctx: RunContext) {
   return createSdkMcpServer({
     name: 'maestro',
     version: '1.0.0',
-    tools: [taskCreate, taskUpdate, sendToAgent, memorySave, report],
+    tools: [taskCreate, taskUpdate, sendToAgent, memorySave, skillSave, report],
   });
 }

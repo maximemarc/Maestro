@@ -1,0 +1,18 @@
+# Contexte de build minimal : tout ce qui suit serait recopié pour rien, et
+# certaines entrées ne doivent jamais entrer dans une image.
+node_modules
+packages/*/node_modules
+packages/web/dist
+.git
+.claude
+.agents
+.githooks
+*.log
+.env
+.env.*
+!.env.example
+# 🔒 Jamais de base ni de jeton dans un contexte de build : ils contiennent les
+# transcripts, les workspaces et un accès complet à l'API.
+*.db
+*.db-*
+token

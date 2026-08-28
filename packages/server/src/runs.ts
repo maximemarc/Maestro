@@ -20,6 +20,7 @@ import type { ApprovalBroker } from './permissions.ts';
 import type { McpRegistry } from './mcp-registry.ts';
 import type { PluginService } from './plugins.ts';
 import type { RagService } from './rag.ts';
+import { buildSandboxSettings, describeSandbox } from './sandbox.ts';
 import type { SkillRegistry } from './skills.ts';
 import { TmuxBridge } from './tmux.ts';
 import { makeId, nowIso, truncate } from './util.ts';
@@ -399,6 +400,7 @@ export class RunEngine {
         agents: this.agents,
         bus: this.bus,
         engine: this,
+        skills: this.skills,
         maxAgentDepth: () => settings.maxAgentDepth,
       },
       { runId: run.id, agent, depth: entry.depth },
@@ -471,6 +473,17 @@ export class RunEngine {
     );
     if (ragServer) mcpServers.rag = ragServer;
 
+    const sandboxSettings = buildSandboxSettings(agent.sandbox, { dataDir: this.config.dataDir });
+    const sandboxNote = describeSandbox(sandboxSettings);
+    if (sandboxNote) {
+      // Un confinement actif change ce que l'agent peut faire : le taire rendrait
+      // incompréhensible une commande qui échoue faute de réseau.
+      this.bus.log('info', 'runs', `Run ${run.id} : ${sandboxNote}`, {
+        agentId: agent.id,
+        runId: run.id,
+      });
+    }
+
     // Note : les outils mcp__maestro__* ne sont PAS mis dans allowedTools — une
     // entrée nue y court-circuiterait canUseTool ; le broker les autorise déjà.
     const options: Options = {
@@ -496,6 +509,14 @@ export class RunEngine {
         ? { disallowedTools: agent.disallowedTools }
         : {}),
       ...(agent.maxTurns ? { maxTurns: agent.maxTurns } : {}),
+      /*
+       * Confinement, quand l'agent en a un.
+       *
+       * Étalé conditionnellement et non passé à `undefined` : un agent sans bac
+       * à sable doit produire exactement les options d'avant, sans clé
+       * supplémentaire dont le SDK pourrait un jour tirer un comportement.
+       */
+      ...(sandboxSettings ? { sandbox: sandboxSettings } : {}),
       ...(run.sessionId ? { resume: run.sessionId } : {}),
       abortController: entry.abort,
       stderr: (data: string) => {

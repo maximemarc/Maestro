@@ -68,6 +68,11 @@ export interface AgentConfig {
   timeoutSec: number | null;
   /** Budget de tokens (entrée+sortie) par run ; le run est interrompu au-delà. */
   tokenBudget: number | null;
+  /**
+   * Bac à sable d'exécution. `null` = aucun confinement, le comportement par
+   * défaut et historique. Voir {@link AgentSandbox}.
+   */
+  sandbox: AgentSandbox | null;
   /** Couleur hexadécimale du nœud dans le graphe Mission Control. */
   color: string;
   /** Position épinglée dans le graphe (null = libre, pilotée par la simulation). */
@@ -80,6 +85,44 @@ export interface AgentConfig {
 export type AgentCreate = Omit<AgentConfig, 'id' | 'workspaceDir' | 'createdAt' | 'updatedAt'> & {
   workspaceDir?: string | null;
 };
+
+/**
+ * Confinement d'un agent, par agent et jamais imposé.
+ *
+ * Le bac à sable est celui de Claude Code lui-même : isolation du système de
+ * fichiers, filtrage de l'egress réseau et seccomp, appliqués aux commandes que
+ * l'agent lance. C'est un cran plus fin qu'un conteneur — il distingue lecture
+ * et écriture par chemin, et laisse la session parler à l'API pendant que les
+ * commandes, elles, restent enfermées. Un conteneur, quand on en veut un
+ * malgré tout, enveloppe l'instance entière (voir le Dockerfile).
+ *
+ * `enabled: false` ou `sandbox: null` : Maestro se comporte exactement comme
+ * avant. Le confinement est une décision par agent, prise pour un agent dont on
+ * n'est pas sûr — pas un péage que tous les autres paient.
+ */
+export interface AgentSandbox {
+  enabled: boolean;
+  /**
+   * Refuser de démarrer si le bac à sable est indisponible.
+   *
+   * Faux par défaut, comme le SDK : sur une plateforme non gérée, l'agent
+   * tourne alors sans confinement avec un avertissement. Le passer à vrai fait
+   * du confinement une condition d'exécution — le bon choix pour un agent
+   * précisément jugé risqué, où « dégradé en silence » est le pire des cas.
+   */
+  failIfUnavailable: boolean;
+  /**
+   * Domaines joignables par les commandes. Vide = aucune sortie réseau.
+   * Accepte les jokers de Claude Code (`*.exemple.fr`).
+   */
+  allowedDomains: string[];
+  /** Refuser tout hôte hors liste au lieu de demander une approbation. */
+  strictAllowlist: boolean;
+  /** Chemins ouverts en écriture en plus du workspace de l'agent. */
+  allowWrite: string[];
+  /** Chemins interdits en lecture, en plus des protections systématiques. */
+  denyRead: string[];
+}
 
 /** Gabarits d'agents proposés à la création. */
 export interface AgentTemplate {

@@ -476,7 +476,7 @@ packages/
 `task.updated`, `metrics.tick`…) qui tient l'interface à jour.
 
 **Outils MCP exposés à chaque agent** (`mcp__maestro__*`) :
-`task_create`, `task_update`, `send_to_agent`, `memory_save`, `report`.
+`task_create`, `task_update`, `send_to_agent`, `memory_save`, `skill_save`, `report`.
 
 ## Sécurité
 

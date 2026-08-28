@@ -20,6 +20,7 @@ import {
   parseOptionalInt,
   parseToolList,
   toForm,
+  toSandbox,
   type ConfigForm,
 } from './shared';
 
@@ -101,6 +102,7 @@ export function ConfigTab({ agent }: { agent: AgentConfig }) {
         ragCollectionIds: form.ragCollectionIds,
         allowedTools: parseToolList(form.allowedTools),
         disallowedTools: parseToolList(form.disallowedTools),
+        sandbox: toSandbox(form),
       });
       setSaved(true);
     } catch (err) {
@@ -372,6 +374,90 @@ export function ConfigTab({ agent }: { agent: AgentConfig }) {
             />
           </Field>
         </div>
+        {/* Confinement.
+            Replié tant qu'il est inactif : c'est une option pour un agent dont
+            on doute, pas un réglage que tout le monde doit lire. */}
+        <details className="mt-4" open={form.sandboxEnabled}>
+          <summary className="summary-toggle">
+            Bac à sable {form.sandboxEnabled ? '— actif' : '— inactif'}
+          </summary>
+
+          <p className="text-faint text-xs mt-2">
+            Confine les commandes lancées par l’agent : isolation du système de fichiers, egress
+            réseau filtré, seccomp. C’est le bac à sable de Claude Code, pas un conteneur — il
+            distingue lecture et écriture par chemin, et la session continue de parler à l’API
+            pendant que les commandes restent enfermées. Le jeton et la base de Maestro sont
+            toujours illisibles depuis un agent confiné, sans quoi il lui suffirait de les lire pour
+            se faire lancer un run libre.
+          </p>
+
+          <label className="checkbox-row mt-2">
+            <input
+              type="checkbox"
+              checked={form.sandboxEnabled}
+              onChange={(e) => set('sandboxEnabled', e.target.checked)}
+            />
+            Confiner cet agent
+          </label>
+
+          {form.sandboxEnabled && (
+            <>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.sandboxRequired}
+                  onChange={(e) => set('sandboxRequired', e.target.checked)}
+                />
+                Exiger le confinement (échouer plutôt que de tourner sans)
+              </label>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.sandboxStrict}
+                  onChange={(e) => set('sandboxStrict', e.target.checked)}
+                />
+                Refuser les hôtes hors liste au lieu de demander
+              </label>
+
+              <div className="grid cols-3 mt-2">
+                <Field
+                  label="Domaines autorisés"
+                  hint="Un par ligne, jokers admis. Vide = aucune sortie réseau."
+                >
+                  <textarea
+                    className="textarea"
+                    rows={4}
+                    value={form.sandboxDomains}
+                    onChange={(e) => set('sandboxDomains', e.target.value)}
+                    placeholder={'registry.npmjs.org\n*.cneidf.net'}
+                  />
+                </Field>
+                <Field
+                  label="Écriture autorisée"
+                  hint="Chemins en plus du workspace, un par ligne."
+                >
+                  <textarea
+                    className="textarea"
+                    rows={4}
+                    value={form.sandboxAllowWrite}
+                    onChange={(e) => set('sandboxAllowWrite', e.target.value)}
+                    placeholder="/tmp/partage"
+                  />
+                </Field>
+                <Field label="Lecture interdite" hint="Chemins à masquer, un par ligne.">
+                  <textarea
+                    className="textarea"
+                    rows={4}
+                    value={form.sandboxDenyRead}
+                    onChange={(e) => set('sandboxDenyRead', e.target.value)}
+                    placeholder={'~/.ssh\n~/.aws'}
+                  />
+                </Field>
+              </div>
+            </>
+          )}
+        </details>
+
         <dl className="kv">
           <dt>Workspace</dt>
           <dd className="mono">{agent.workspaceDir}</dd>
