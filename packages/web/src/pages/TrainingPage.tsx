@@ -102,7 +102,7 @@ const EMPTY_FORM: FormState = {
  * 'TVA'] }`. Un tableau de saisie par variable aurait été plus rigoureux et
  * bien plus long à remplir : ici on décrit dix variables en dix lignes.
  */
-function parseVariables(raw: string): Record<string, string[]> {
+export function parseVariables(raw: string): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   for (const line of raw.split('\n')) {
     const sep = line.indexOf(':');
@@ -118,24 +118,32 @@ function parseVariables(raw: string): Record<string, string[]> {
   return out;
 }
 
-function formatVariables(variables: Record<string, string[]>): string {
+export function formatVariables(variables: Record<string, string[]>): string {
   return Object.entries(variables)
     .map(([key, values]) => `${key}: ${values.join(', ')}`)
     .join('\n');
 }
 
 /** `Read 70` ou `Read: 70`, une pondération par ligne. */
-function parseToolWeights(raw: string): Array<{ tool: string; weight: number }> {
+export function parseToolWeights(raw: string): Array<{ tool: string; weight: number }> {
   const out: Array<{ tool: string; weight: number }> = [];
   for (const line of raw.split('\n')) {
     const match = /^\s*([\w:.-]+)\s*[:=\s]\s*(\d+(?:[.,]\d+)?)\s*$/.exec(line);
     if (!match?.[1] || !match[2]) continue;
-    out.push({ tool: match[1], weight: Number.parseFloat(match[2].replace(',', '.')) });
+    /*
+     * Le deux-points est dans la classe du nom — un outil MCP s'écrit
+     * `mcp__serveur__outil`, et certains noms en contiennent. La capture est
+     * donc gourmande et emporte le séparateur : « Read: 70 » donnait un outil
+     * nommé « Read: », injecté tel quel dans les prompts du lot.
+     */
+    const tool = match[1].replace(/[:=]+$/, '');
+    if (!tool) continue;
+    out.push({ tool, weight: Number.parseFloat(match[2].replace(',', '.')) });
   }
   return out;
 }
 
-function formatToolWeights(weights: Array<{ tool: string; weight: number }>): string {
+export function formatToolWeights(weights: Array<{ tool: string; weight: number }>): string {
   return weights.map((w) => `${w.tool}: ${w.weight}`).join('\n');
 }
 
