@@ -8,6 +8,7 @@ import type {
   ConnectorInstallRequest,
   ConnectorSearchQuery,
   McpImportCandidate,
+  McpPreset,
   McpProbeResult,
   McpServerDef,
   McpToolTrial,
@@ -382,6 +383,11 @@ export const api = {
   agentStats: () => request<AgentStats[]>('GET', '/api/metrics/agents'),
   tokensBy: (groupBy: 'day' | 'agent' | 'model', days = 30) =>
     request<TokensByBucket[]>('GET', `/api/metrics/tokens?groupBy=${groupBy}&days=${days}`),
+
+  // Catalogue MCP
+  listMcpPresets: () => request<McpPreset[]>('GET', '/api/mcp-presets'),
+  installMcpPreset: (slug: string, input: { env?: Record<string, string>; args?: string[] }) =>
+    request<McpServerDef>('POST', `/api/mcp-presets/${slug}/install`, input),
 
   // Entraînement (MLOps)
   listToolCallDialects: () => request<ToolCallDialectInfo[]>('GET', '/api/training/dialects'),

@@ -19,6 +19,12 @@ import { ConnectorError, type ConnectorRegistry } from './connectors.ts';
 import { previewImport, readConfig, selectForImport } from './mcp-import.ts';
 import { buildRagGraph } from './rag-graph.ts';
 import { probeMcpServer } from './mcp-probe.ts';
+import {
+  findMcpPreset,
+  mcpPresets,
+  missingRequiredEnv,
+  presetToServerInput,
+} from './mcp-presets.ts';
 import { McpError, type McpRegistry } from './mcp-registry.ts';
 import { PluginError, type PluginService } from './plugins.ts';
 import { embeddingStatus } from './rag-embeddings.ts';
@@ -1157,6 +1163,41 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
   // -- Serveurs MCP -----------------------------------------------------------
 
   app.get('/api/mcp-servers', async () => s.mcp.list());
+
+  /**
+   * Catalogue de serveurs prêts à déclarer.
+   *
+   * Sert de raccourci, pas de dépendance : ces serveurs se déclarent aussi à la
+   * main, et le catalogue ne fait que dispenser de connaître leur nom de paquet.
+   */
+  app.get('/api/mcp-presets', async () => mcpPresets());
+
+  app.post('/api/mcp-presets/:slug/install', async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const preset = findMcpPreset(slug);
+    if (!preset) return reply.code(404).send({ error: `Preset inconnu : ${slug}` });
+
+    const body = parseOr400(
+      z.object({
+        env: keyValueSchema.default({}),
+        args: z.array(z.string().max(2000)).max(30).default([]),
+      }),
+      req.body ?? {},
+    );
+    const missing = missingRequiredEnv(preset, body.env);
+    if (missing.length > 0) {
+      return reply
+        .code(400)
+        .send({ error: `Variables requises manquantes : ${missing.join(', ')}` });
+    }
+    try {
+      reply.code(201);
+      return s.mcp.create(presetToServerInput(preset, { env: body.env, args: body.args }));
+    } catch (err) {
+      if (err instanceof McpError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
 
   app.post('/api/mcp-servers', async (req, reply) => {
     const body = mcpServerSchema.parse(req.body);

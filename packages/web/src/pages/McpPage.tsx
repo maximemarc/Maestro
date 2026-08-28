@@ -11,6 +11,7 @@ import {
   CheckCircle,
   DownloadSimple,
   MagnifyingGlass,
+  Package,
   Plug,
   Play,
   Plus,
@@ -30,6 +31,7 @@ import type {
 import { api, type McpImportSource, type McpServerInput } from '../lib/api';
 import { useStore } from '../lib/store';
 import { ConfirmButton, EmptyState, ErrorText, Field, Modal, Spinner } from '../components/ui';
+import { McpPresetCatalog } from '../components/McpPresetCatalog';
 
 /** Marqueur employé par le serveur pour une valeur sensible déjà enregistrée. */
 const SECRET_MASK = '••••••••';
@@ -170,6 +172,7 @@ export default function McpPage() {
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
+  const [catalogOpen, setCatalogOpen] = useState(false);
 
   const custom = useMemo(() => servers.filter((s) => s.kind === 'custom'), [servers]);
   const external = useMemo(() => servers.filter((s) => s.kind === 'external'), [servers]);
@@ -228,6 +231,10 @@ export default function McpPage() {
       <div className="page-header">
         <h1>MCP</h1>
         <span className="spacer" />
+        <button className="btn" onClick={() => setCatalogOpen(true)}>
+          <Package />
+          Catalogue
+        </button>
         <button className="btn" onClick={() => setImportOpen(true)}>
           <DownloadSimple />
           Importer une configuration
@@ -300,6 +307,14 @@ export default function McpPage() {
       )}
 
       {importOpen && <ImportModal onClose={() => setImportOpen(false)} />}
+      {catalogOpen && (
+        /* Pas de rechargement à faire : le serveur diffuse `mcp.updated` et le
+           store tient la liste à jour tout seul. On se contente de le dire. */
+        <McpPresetCatalog
+          onClose={() => setCatalogOpen(false)}
+          onInstalled={() => notify('Serveur déclaré depuis le catalogue.')}
+        />
+      )}
 
       {editing && (
         <ServerModal

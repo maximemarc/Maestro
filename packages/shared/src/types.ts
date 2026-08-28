@@ -805,6 +805,38 @@ export interface McpServerDef {
   updatedAt: string;
 }
 
+/**
+ * Serveur MCP prêt à déclarer, issu du catalogue livré.
+ *
+ * Un raccourci, pas une dépendance : ces serveurs se déclarent aussi à la main.
+ * Le catalogue dispense seulement de connaître le nom de paquet, les arguments
+ * et les variables d'environnement de chacun.
+ */
+export type McpPresetCategory =
+  'navigateur' | 'web' | 'fichiers' | 'raisonnement' | 'développement';
+
+export interface McpPresetEnvKey {
+  key: string;
+  /** À quoi sert la variable, et où l'obtenir. */
+  hint: string;
+  required: boolean;
+}
+
+export interface McpPreset {
+  slug: string;
+  name: string;
+  description: string;
+  category: McpPresetCategory;
+  /** Runtime attendu sur la machine — un runtime absent fait échouer le serveur. */
+  runtime: 'npx' | 'uvx';
+  command: string;
+  args: string[];
+  envKeys: McpPresetEnvKey[];
+  /** Ce que le serveur donne à l'agent, en une phrase. */
+  grants: string;
+  homepage: string;
+}
+
 /** Résultat d'un essai d'outil depuis l'interface, avant de l'ouvrir aux agents. */
 export interface McpToolTrial {
   ok: boolean;
