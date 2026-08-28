@@ -93,6 +93,7 @@ describe('file d’arbitrage', () => {
           input: {},
           status: 'pending',
           resolvedBy: null,
+          resolvedByLabel: null,
           note: null,
           requestedAt: new Date().toISOString(),
           resolvedAt: null,

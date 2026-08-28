@@ -4,7 +4,7 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Settings, TmuxSessionInfo } from '@maestro/shared';
+import type { AccessToken, Settings, TmuxSessionInfo } from '@maestro/shared';
 import { api, type MaintenanceState } from '../lib/api';
 import { fmtBytes, fmtDateTime } from '../lib/format';
 import { useStore } from '../lib/store';
@@ -274,6 +274,8 @@ export default function SettingsPage() {
               </div>
 
               <MaintenancePanel />
+
+              <AccessTokensPanel />
             </>
           )}
         </div>
@@ -476,6 +478,137 @@ function MaintenancePanel() {
         configuration des serveurs MCP et leurs clés : elle mérite les mêmes précautions que la base
         elle-même.
       </p>
+    </div>
+  );
+}
+
+/**
+ * Jetons d'accès nommés.
+ *
+ * Un seul jeton partagé rendait toute action inattribuable — une approbation
+ * était enregistrée « web », sans dire qui, alors que l'attribution est
+ * précisément ce qu'un human-in-the-loop doit garantir. Révoquer l'accès d'une
+ * personne obligeait par ailleurs à changer le jeton de tout le monde.
+ */
+function AccessTokensPanel() {
+  const notify = useStore((s) => s.notify);
+  const [tokens, setTokens] = useState<AccessToken[] | null>(null);
+  const [label, setLabel] = useState('');
+  const [created, setCreated] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    api
+      .listAccessTokens()
+      .then(setTokens)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(load, [load]);
+
+  const create = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.createAccessToken(label.trim());
+      /* Montré une seule fois : seule l'empreinte est conservée, et le
+         réafficher supposerait de stocker la valeur en clair. */
+      setCreated(result.value);
+      setLabel('');
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async (id: string) => {
+    setError(null);
+    try {
+      await api.revokeAccessToken(id);
+      notify('Jeton révoqué.');
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div className="mt-4">
+      <div className="section-label">Jetons d’accès</div>
+      <p className="text-faint text-xs">
+        Un jeton par personne ou par script. Son nom suit ce qu’il fait : une approbation dit
+        désormais <em>qui</em> a tranché, et pas seulement par quel canal. Révoquer un jeton n’a
+        aucun effet sur les autres. Le jeton principal, celui de la configuration, reste toujours
+        valable — c’est lui qui permet de reprendre la main.
+      </p>
+
+      {error && <ErrorText>{error}</ErrorText>}
+
+      {created && (
+        <div className="card card-ok mt-2" role="status">
+          <div>Jeton créé. Il ne sera plus affiché :</div>
+          <pre className="mono-preview">{created}</pre>
+          <button className="btn ghost sm" onClick={() => setCreated(null)}>
+            J’ai noté
+          </button>
+        </div>
+      )}
+
+      <div className="row gap-2 mt-2 items-baseline">
+        <input
+          className="input"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Nom (une personne, un script…)"
+        />
+        <button className="btn" onClick={() => void create()} disabled={busy || !label.trim()}>
+          Créer un jeton
+        </button>
+      </div>
+
+      {tokens && tokens.length > 0 && (
+        <div className="table-wrap mt-3">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Nom</th>
+                <th>Aperçu</th>
+                <th>Dernier usage</th>
+                <th>État</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.map((t) => (
+                <tr key={t.id}>
+                  <td className="text-strong">{t.label}</td>
+                  <td className="mono">{t.preview}</td>
+                  <td>{t.lastUsedAt ? fmtDateTime(t.lastUsedAt) : 'jamais'}</td>
+                  <td>
+                    {t.revokedAt ? (
+                      <span className="badge cancelled">révoqué</span>
+                    ) : (
+                      <span className="badge succeeded">actif</span>
+                    )}
+                  </td>
+                  <td>
+                    {!t.revokedAt && (
+                      <ConfirmButton
+                        label="Révoquer"
+                        confirmLabel={`Révoquer « ${t.label} » ?`}
+                        onConfirm={() => void revoke(t.id)}
+                      />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

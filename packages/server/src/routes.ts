@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { KANBAN_COLUMNS } from '@maestro/shared';
 import type { OverviewResponse, ToolCallDialect } from '@maestro/shared';
 import { AGENT_TEMPLATES, type AgentService } from './agents.ts';
+import { generateToken, hashToken, tokenPreview, type Identity } from './access-tokens.ts';
 import type { Bus } from './bus.ts';
 import type { MaestroConfig } from './config.ts';
 import type { Store } from './db.ts';
@@ -46,7 +47,7 @@ import { DEFAULT_SPEC, TrainingError, type TrainingService } from './training.ts
 import { summarise } from './training-compare.ts';
 import { toJsonl } from './training-export.ts';
 import { TOOL_CALL_DIALECTS, listDialects } from './training-parsers.ts';
-import { nowIso } from './util.ts';
+import { makeId, nowIso } from './util.ts';
 
 export interface Services {
   config: MaestroConfig;
@@ -677,7 +678,21 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
       z.object({ decision: z.enum(['allow', 'deny']), note: z.string().max(500).optional() }),
       req.body,
     );
-    const approval = s.approvals.resolve(id, body.decision, 'web', body.note ?? null);
+    /*
+     * Qui a tranché, et pas seulement par où.
+     *
+     * C'est tout l'objet des jetons nommés : « web » ne disait rien d'utile
+     * dès qu'on est deux, alors que l'attribution est précisément ce qu'un
+     * human-in-the-loop doit garantir.
+     */
+    const identity = (req as { identity?: Identity }).identity;
+    const approval = s.approvals.resolve(
+      id,
+      body.decision,
+      'web',
+      body.note ?? null,
+      identity?.label ?? null,
+    );
     if (!approval) return reply.code(404).send({ error: 'Approbation introuvable' });
     return approval;
   });
@@ -1052,6 +1067,44 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
       agents: s.store.countRows('agents'),
       runsTotal: s.store.countRows('runs'),
     });
+  });
+
+  // -- Jetons d'accès ----------------------------------------------------------------------------
+
+  app.get('/api/access-tokens', async () => s.store.listAccessTokens());
+
+  /**
+   * Crée un jeton nommé.
+   *
+   * 🔒 La valeur n'est renvoyée qu'ici, une seule fois : seule son empreinte est
+   * conservée. La réafficher ensuite supposerait de la stocker en clair, ce qui
+   * annulerait tout l'intérêt.
+   */
+  app.post('/api/access-tokens', async (req, reply) => {
+    const body = parseOr400(z.object({ label: z.string().trim().min(1).max(60) }), req.body);
+    const value = generateToken();
+    const token = {
+      id: makeId('tok'),
+      label: body.label,
+      preview: tokenPreview(value),
+      createdAt: nowIso(),
+      lastUsedAt: null,
+      revokedAt: null,
+    };
+    s.store.insertAccessToken(token, hashToken(value));
+    s.bus.log('warn', 'auth', `Jeton d'accès « ${token.label} » créé`);
+    reply.code(201);
+    return { token, value };
+  });
+
+  app.post('/api/access-tokens/:id/revoke', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!s.store.revokeAccessToken(id, nowIso())) {
+      return reply.code(404).send({ error: 'Jeton introuvable ou déjà révoqué' });
+    }
+    // Trace en avertissement : révoquer un accès mérite d'apparaître au journal.
+    s.bus.log('warn', 'auth', `Jeton d'accès ${id} révoqué`);
+    return { ok: true };
   });
 
   // -- Entretien de la base ----------------------------------------------------------------------

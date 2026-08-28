@@ -4,6 +4,7 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 import type {
+  AccessToken,
   McpServerDef,
   RagCollection,
   RagDocument,
@@ -321,6 +322,18 @@ CREATE TABLE IF NOT EXISTS training_items (
 CREATE INDEX IF NOT EXISTS idx_training_items_batch ON training_items(batch_id, idx);
 CREATE INDEX IF NOT EXISTS idx_training_items_status ON training_items(batch_id, status);
 
+CREATE TABLE IF NOT EXISTS access_tokens (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  /* 🔒 Empreinte SHA-256, jamais la valeur : un vol de base ne donne aucun accès. */
+  token_hash TEXT NOT NULL UNIQUE,
+  preview TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_access_tokens_hash ON access_tokens(token_hash);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -545,6 +558,7 @@ function rowToApproval(r: SqlRow): Approval {
     input: safeJsonParse<unknown>(str(r.input), null),
     status: str(r.status) as ApprovalStatus,
     resolvedBy: strOrNull(r.resolved_by) as ApprovalResolver | null,
+    resolvedByLabel: strOrNull(r.resolved_by_label),
     note: strOrNull(r.note),
     requestedAt: str(r.requested_at),
     resolvedAt: strOrNull(r.resolved_at),
@@ -708,6 +722,14 @@ export class Store {
        * qu'il existe. L'absence est le comportement historique, et elle se lit.
        */
       ['agents', 'sandbox', 'ALTER TABLE agents ADD COLUMN sandbox TEXT'],
+      /*
+       * Qui a tranché une approbation, et pas seulement par où.
+       *
+       * Nulle sur les approbations antérieures : on ne peut pas inventer une
+       * identité après coup, et prétendre le contraire serait pire que
+       * l'absence d'information.
+       */
+      ['approvals', 'resolved_by_label', 'ALTER TABLE approvals ADD COLUMN resolved_by_label TEXT'],
     ];
     for (const [table, column, ddl] of added) {
       const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as SqlRow[];
@@ -1034,12 +1056,14 @@ export class Store {
     status: Exclude<ApprovalStatus, 'pending'>,
     resolvedBy: ApprovalResolver,
     note: string | null,
+    /** Nom du jeton qui a tranché. Nul pour une résolution automatique. */
+    resolvedByLabel: string | null = null,
   ): Approval | null {
     this.db
       .prepare(
-        "UPDATE approvals SET status=?, resolved_by=?, note=?, resolved_at=? WHERE id=? AND status='pending'",
+        "UPDATE approvals SET status=?, resolved_by=?, resolved_by_label=?, note=?, resolved_at=? WHERE id=? AND status='pending'",
       )
-      .run(status, resolvedBy, note, nowIso(), id);
+      .run(status, resolvedBy, resolvedByLabel, note, nowIso(), id);
     return this.getApproval(id);
   }
 
@@ -1966,6 +1990,63 @@ export class Store {
     }));
   }
 
+  // -- Jetons d'accès --------------------------------------------------------
+
+  listAccessTokens(): AccessToken[] {
+    const rows = this.db
+      .prepare('SELECT * FROM access_tokens ORDER BY created_at DESC')
+      .all() as SqlRow[];
+    return rows.map(rowToAccessToken);
+  }
+
+  insertAccessToken(token: AccessToken, hash: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO access_tokens (id, label, token_hash, preview, created_at, last_used_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        token.id,
+        token.label,
+        hash,
+        token.preview,
+        token.createdAt,
+        token.lastUsedAt,
+        token.revokedAt,
+      );
+  }
+
+  /**
+   * Retrouve un jeton actif par son empreinte.
+   *
+   * Un jeton révoqué est traité comme inexistant : la révocation doit prendre
+   * effet immédiatement, sans redémarrage ni expiration de cache.
+   */
+  findActiveAccessToken(hash: string): AccessToken | null {
+    const row = this.db
+      .prepare('SELECT * FROM access_tokens WHERE token_hash = ? AND revoked_at IS NULL')
+      .get(hash) as SqlRow | undefined;
+    return row ? rowToAccessToken(row) : null;
+  }
+
+  touchAccessToken(id: string, at: string): void {
+    this.db.prepare('UPDATE access_tokens SET last_used_at = ? WHERE id = ?').run(at, id);
+  }
+
+  /**
+   * Révoque un jeton sans l'effacer.
+   *
+   * La ligne reste : c'est elle qui permet de dire, six mois plus tard, quel
+   * jeton avait approuvé quoi. Supprimer effacerait la trace en même temps que
+   * l'accès.
+   */
+  revokeAccessToken(id: string, at: string): boolean {
+    const res = this.db
+      .prepare('UPDATE access_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+      .run(at, id);
+    return Number(res.changes) > 0;
+  }
+
   // -- Maintenance ----------------------------------------------------------
 
   /**
@@ -2267,6 +2348,17 @@ export class Store {
       .get(runId) as SqlRow | undefined;
     return row ? numOrNull(row.score) : null;
   }
+}
+
+function rowToAccessToken(r: SqlRow): AccessToken {
+  return {
+    id: str(r.id),
+    label: str(r.label),
+    preview: str(r.preview),
+    createdAt: str(r.created_at),
+    lastUsedAt: strOrNull(r.last_used_at),
+    revokedAt: strOrNull(r.revoked_at),
+  };
 }
 
 function rowToTrainingItem(r: SqlRow): TrainingItem {

@@ -8,6 +8,8 @@
  */
 
 /** Ce dont la décision a besoin d'une requête, et rien de plus. */
+import type { Identity } from './access-tokens.ts';
+
 export interface AuthRequest {
   url: string;
   headers: Record<string, unknown>;
@@ -17,24 +19,18 @@ export interface AuthRequest {
 export type AuthOutcome =
   /** Chemin public ou hors périmètre protégé : laisser passer sans contrôle. */
   | { kind: 'public' }
-  | { kind: 'allowed' }
+  /** Autorisé, avec l'identité qui suivra la requête jusqu'à ses effets. */
+  | { kind: 'allowed'; identity: Identity }
   /** Refus, avec la forme d'erreur attendue par le client. */
   | { kind: 'denied'; shape: 'rest' | 'jsonrpc' };
 
 /**
- * Comparaison à durée constante.
+ * Résout un jeton présenté en identité.
  *
- * Une comparaison de chaînes s'arrête au premier caractère différent, ce qui
- * rend le temps de réponse dépendant du préfixe correct fourni. C'est
- * exploitable sur un secret comparé à chaque requête. Le surcoût est nul à cette
- * échelle.
+ * Injecté plutôt que codé ici : ce module ne doit connaître ni la base ni le
+ * fichier de configuration, sous peine de redevenir intestable — ce qu'il était.
  */
-function safeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-}
+export type IdentityResolver = (presented: string) => Identity | null;
 
 /**
  * Tranche une requête.
@@ -52,7 +48,7 @@ function safeEqual(a: string, b: string): boolean {
  *     incontournable ; partout ailleurs il fuirait dans les journaux du serveur,
  *     ceux du reverse proxy et l'historique du navigateur.
  */
-export function authorize(req: AuthRequest, expectedToken: string): AuthOutcome {
+export function authorize(req: AuthRequest, resolve: IdentityResolver): AuthOutcome {
   const url = req.url;
   const isWebSocket = url.startsWith('/ws');
   const isGateway = url.startsWith('/mcp');
@@ -62,14 +58,16 @@ export function authorize(req: AuthRequest, expectedToken: string): AuthOutcome 
   if (url.startsWith('/api/health')) return { kind: 'public' };
 
   const header = req.headers['authorization'];
-  if (typeof header === 'string' && safeEqual(header, `Bearer ${expectedToken}`)) {
-    return { kind: 'allowed' };
+  if (typeof header === 'string' && header.startsWith('Bearer ')) {
+    const identity = resolve(header.slice('Bearer '.length));
+    if (identity) return { kind: 'allowed', identity };
   }
 
   if (isWebSocket) {
     const token = (req.query as { token?: string } | undefined)?.token;
-    if (typeof token === 'string' && safeEqual(token, expectedToken)) {
-      return { kind: 'allowed' };
+    if (typeof token === 'string') {
+      const identity = resolve(token);
+      if (identity) return { kind: 'allowed', identity };
     }
   }
 

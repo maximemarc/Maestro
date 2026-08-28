@@ -248,6 +248,22 @@ export interface TokenUsage {
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired';
 export type ApprovalResolver = 'web' | 'telegram' | 'policy' | 'timeout';
 
+/**
+ * Jeton d'acces nomme.
+ *
+ * 🔒 La valeur n'est jamais renvoyee : seule son empreinte est en base, et le
+ * jeton n'est montre qu'une fois, a la creation. `preview` sert a le reconnaitre
+ * dans une liste sans le divulguer.
+ */
+export interface AccessToken {
+  id: string;
+  label: string;
+  preview: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
 export interface Approval {
   id: string;
   runId: string;
@@ -257,6 +273,14 @@ export interface Approval {
   input: unknown;
   status: ApprovalStatus;
   resolvedBy: ApprovalResolver | null;
+  /**
+   * Nom du jeton qui a tranche.
+   *
+   * « web » disait par ou, jamais par qui — or c'est exactement ce qu'un
+   * human-in-the-loop doit garantir. Nul pour une resolution automatique
+   * (politique, expiration) et pour les approbations anterieures.
+   */
+  resolvedByLabel: string | null;
   note: string | null;
   requestedAt: string;
   resolvedAt: string | null;

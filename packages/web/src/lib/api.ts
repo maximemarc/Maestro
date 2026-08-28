@@ -2,6 +2,7 @@
  * Client REST typé. Le jeton est conservé en localStorage ('maestro_token').
  */
 import type {
+  AccessToken,
   AgentConfig,
   ConnectorInstallAgentRequest,
   ConnectorInstallPluginRequest,
@@ -444,6 +445,13 @@ export const api = {
       'GET',
       `/api/training/compare?baseline=${encodeURIComponent(baseline)}&candidate=${encodeURIComponent(candidate)}`,
     ),
+
+  // Jetons d'accès nommés
+  listAccessTokens: () => request<AccessToken[]>('GET', '/api/access-tokens'),
+  createAccessToken: (label: string) =>
+    request<{ token: AccessToken; value: string }>('POST', '/api/access-tokens', { label }),
+  revokeAccessToken: (id: string) =>
+    request<{ ok: boolean }>('POST', `/api/access-tokens/${id}/revoke`),
 
   // Entretien de la base
   getMaintenance: () => request<MaintenanceState>('GET', '/api/maintenance'),

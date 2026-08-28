@@ -13,6 +13,7 @@ import fastifyWebsocket from '@fastify/websocket';
 import { RUN_INTERRUPTED_BY_RESTART, type ServerEvent } from '@maestro/shared';
 import { AgentService } from './agents.ts';
 import { authorize, deniedBody } from './auth.ts';
+import { makeIdentityResolver } from './identity.ts';
 import { Bus } from './bus.ts';
 import { loadConfig } from './config.ts';
 import { ConnectorRegistry } from './connectors.ts';
@@ -147,13 +148,23 @@ await app.register(fastifyWebsocket);
  * milieu de l'assemblage, où rien ne pouvait la vérifier, alors que c'est le
  * seul rempart entre l'extérieur et le lancement d'agents.
  */
+const resolveIdentity = makeIdentityResolver(store, config.authToken);
+
 app.addHook('onRequest', async (req, reply) => {
   const outcome = authorize(
     { url: req.raw.url ?? '', headers: req.headers, query: req.query },
-    config.authToken,
+    resolveIdentity,
   );
-  if (outcome.kind !== 'denied') return;
-  return reply.code(401).send(deniedBody(outcome.shape));
+  if (outcome.kind === 'denied') {
+    return reply.code(401).send(deniedBody(outcome.shape));
+  }
+  /*
+   * L'identité suit la requête jusqu'à ses effets. C'est elle qui permet de
+   * dire qui a approuvé quoi — « web » disait par où, jamais par qui.
+   */
+  if (outcome.kind === 'allowed') {
+    (req as { identity?: unknown }).identity = outcome.identity;
+  }
 });
 
 app.register(async (scope) => {
