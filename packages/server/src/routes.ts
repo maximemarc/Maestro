@@ -11,6 +11,7 @@ import type { MaestroConfig } from './config.ts';
 import type { Store } from './db.ts';
 import type { TaskService } from './kanban.ts';
 import type { Metrics } from './metrics.ts';
+import { renderPrometheus } from './metrics-prometheus.ts';
 import type { ApprovalBroker } from './permissions.ts';
 import type { PipelineService } from './pipelines.ts';
 import type { RunEngine } from './runs.ts';
@@ -38,6 +39,7 @@ import {
   changes as gitChanges,
   commitToBranch,
   patch as gitPatch,
+  pushBranch,
 } from './workspace-git.ts';
 import type { MaintenanceService } from './maintenance.ts';
 import { DEFAULT_SPEC, TrainingError, type TrainingService } from './training.ts';
@@ -1034,6 +1036,23 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     return { ok: true };
   });
 
+  /**
+   * Exposition Prometheus.
+   *
+   * En `text/plain; version=0.0.4` : c'est le type que les collecteurs
+   * attendent, et un `application/json` les fait échouer sans message utile.
+   * La route reste derrière le jeton, comme le reste de l'API — les valeurs
+   * exposées disent l'activité de l'instance.
+   */
+  app.get('/api/metrics/prometheus', async (_req, reply) => {
+    reply.header('content-type', 'text/plain; version=0.0.4; charset=utf-8');
+    return renderPrometheus(s.metrics.snapshot(), {
+      databaseBytes: s.store.databaseBytes(),
+      agents: s.store.countRows('agents'),
+      runsTotal: s.store.countRows('runs'),
+    });
+  });
+
   // -- Entretien de la base ----------------------------------------------------------------------
 
   /** État : taille de la base, rétention en vigueur, sauvegardes disponibles. */
@@ -1171,13 +1190,55 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     return toJsonl(lines);
   });
 
+  /**
+   * Publie la branche d'un run et rend le lien de merge request.
+   *
+   * 🔒 Le push emprunte les identifiants git de la machine, jamais un jeton
+   * stocké par Maestro — et il ne pousse que la branche nommée, jamais en force.
+   * La merge request n'est pas créée par API : la forge propose déjà son lien
+   * dans la sortie du push, et le fabriquer aurait exigé un jeton, l'URL de
+   * l'instance et le chemin du projet.
+   */
+  app.post('/api/runs/:id/push', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = s.store.getRun(id);
+    if (!run) return reply.code(404).send({ error: 'Run introuvable' });
+    const agent = s.agents.get(run.agentId);
+    if (!agent) return reply.code(404).send({ error: 'Agent introuvable' });
+
+    const body = parseOr400(
+      z.object({
+        branch: z.string().min(1).max(200),
+        remote: z.string().min(1).max(80).default('origin'),
+      }),
+      req.body ?? {},
+    );
+    try {
+      return await pushBranch(agent.workspaceDir, body);
+    } catch (err) {
+      if (err instanceof WorkspaceGitError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
+
   // -- tmux --------------------------------------------------------------------------------------
 
   app.get('/api/tmux/sessions', async () => {
     const sessions = await s.tmux.list();
-    // Rattache agent/run quand la session correspond à un run connu.
+    /*
+     * Rattache agent et run quand la session correspond à un run connu.
+     *
+     * L'index est construit une fois. La version précédente relisait les deux
+     * cents derniers runs *à l'intérieur* du map, donc une fois par session :
+     * dix sessions ouvertes donnaient dix lectures complètes et deux mille
+     * lignes désérialisées pour retrouver dix correspondances.
+     */
+    const byTmuxSession = new Map<string, { id: string; agentId: string }>();
+    for (const run of s.store.listRuns({ limit: 200 })) {
+      if (run.tmuxSession) byTmuxSession.set(run.tmuxSession, run);
+    }
     return sessions.map((session) => {
-      const run = s.store.listRuns({ limit: 200 }).find((r) => r.tmuxSession === session.name);
+      const run = byTmuxSession.get(session.name);
       return run ? { ...session, runId: run.id, agentId: run.agentId } : session;
     });
   });

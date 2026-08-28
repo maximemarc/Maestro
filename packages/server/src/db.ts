@@ -1975,6 +1975,14 @@ export class Store {
     return Number(res.changes);
   }
 
+  /** Comptages bruts, pour l'exposition de métriques. */
+  countRows(table: 'runs' | 'agents'): number {
+    // Table choisie parmi une union fermée : aucune valeur externe n'atteint
+    // cette interpolation.
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as SqlRow | undefined;
+    return row ? num(row.n) : 0;
+  }
+
   /** Taille du fichier de base, en octets, telle que SQLite la voit. */
   databaseBytes(): number {
     const row = this.db

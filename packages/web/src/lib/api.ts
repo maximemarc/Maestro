@@ -286,6 +286,12 @@ export const api = {
   runBranchName: (id: string) => request<{ branch: string }>('GET', `/api/runs/${id}/branch-name`),
   createRunBranch: (id: string, input: { branch: string; message?: string }) =>
     request<CommitResult>('POST', `/api/runs/${id}/branch`, input),
+  pushRunBranch: (id: string, input: { branch: string; remote?: string }) =>
+    request<{ branch: string; remote: string; mergeRequestUrl: string | null }>(
+      'POST',
+      `/api/runs/${id}/push`,
+      input,
+    ),
 
   // Approbations
   listApprovals: (status?: string) =>
