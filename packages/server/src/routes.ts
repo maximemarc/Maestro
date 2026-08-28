@@ -2,22 +2,22 @@
  * API REST — toutes les mutations passent ici ; le WebSocket ne fait que pousser.
  */
 import type { FastifyInstance } from 'fastify';
+import { registerAdminRoutes } from './routes-admin.ts';
+import {
+  badRequestOn,
+  keyValueSchema,
+  parseOr400,
+  patchOf,
+  type Services,
+} from './routes-shared.ts';
+import { registerTrainingRoutes } from './routes-training.ts';
 import { z } from 'zod';
 import { KANBAN_COLUMNS } from '@maestro/shared';
-import type { OverviewResponse, ToolCallDialect } from '@maestro/shared';
-import { AGENT_TEMPLATES, type AgentService } from './agents.ts';
-import { generateToken, hashToken, tokenPreview, type Identity } from './access-tokens.ts';
-import type { Bus } from './bus.ts';
-import type { MaestroConfig } from './config.ts';
-import type { Store } from './db.ts';
-import type { TaskService } from './kanban.ts';
-import type { Metrics } from './metrics.ts';
+import type { OverviewResponse } from '@maestro/shared';
+import { AGENT_TEMPLATES } from './agents.ts';
+import { type Identity } from './access-tokens.ts';
 import { renderPrometheus } from './metrics-prometheus.ts';
-import type { ApprovalBroker } from './permissions.ts';
-import type { PipelineService } from './pipelines.ts';
-import type { RunEngine } from './runs.ts';
-import type { Scheduler } from './scheduler.ts';
-import { ConnectorError, type ConnectorRegistry } from './connectors.ts';
+import { ConnectorError } from './connectors.ts';
 import { previewImport, readConfig, selectForImport } from './mcp-import.ts';
 import { buildRagGraph } from './rag-graph.ts';
 import { probeMcpServer } from './mcp-probe.ts';
@@ -27,13 +27,10 @@ import {
   missingRequiredEnv,
   presetToServerInput,
 } from './mcp-presets.ts';
-import { McpError, type McpRegistry } from './mcp-registry.ts';
-import { PluginError, type PluginService } from './plugins.ts';
+import { McpError } from './mcp-registry.ts';
+import { PluginError } from './plugins.ts';
 import { embeddingStatus } from './rag-embeddings.ts';
-import { RagError, type RagService } from './rag.ts';
-import type { SessionRadar } from './radar.ts';
-import type { SkillRegistry } from './skills.ts';
-import type { TmuxBridge } from './tmux.ts';
+import { RagError } from './rag.ts';
 import {
   WorkspaceGitError,
   branchNameFor,
@@ -42,36 +39,6 @@ import {
   patch as gitPatch,
   pushBranch,
 } from './workspace-git.ts';
-import type { MaintenanceService } from './maintenance.ts';
-import { DEFAULT_SPEC, TrainingError, type TrainingService } from './training.ts';
-import { summarise } from './training-compare.ts';
-import { toJsonl } from './training-export.ts';
-import { TOOL_CALL_DIALECTS, listDialects } from './training-parsers.ts';
-import { makeId, nowIso } from './util.ts';
-
-export interface Services {
-  config: MaestroConfig;
-  store: Store;
-  bus: Bus;
-  agents: AgentService;
-  skills: SkillRegistry;
-  approvals: ApprovalBroker;
-  tasks: TaskService;
-  engine: RunEngine;
-  scheduler: Scheduler;
-  pipelines: PipelineService;
-  training: TrainingService;
-  maintenance: MaintenanceService;
-  metrics: Metrics;
-  connectors: ConnectorRegistry;
-  plugins: PluginService;
-  mcp: McpRegistry;
-  rag: RagService;
-  radar: SessionRadar;
-  tmux: TmuxBridge;
-  telegramEnabled: boolean;
-  startedAt: string;
-}
 
 // -- MCP ---------------------------------------------------------------------
 
@@ -80,8 +47,6 @@ export interface Services {
  * en-têtes. Les clés sont bornées pour éviter qu'un client n'envoie un objet
  * arbitrairement large, mais les valeurs restent libres : un jeton est opaque.
  */
-const keyValueSchema = z.record(z.string().min(1).max(200), z.string().max(4000));
-
 const mcpParamSchema = z.object({
   name: z.string().min(1).max(31),
   type: z.enum(['string', 'number', 'boolean']),
@@ -281,65 +246,6 @@ const pipelineSchema = z.object({
     .min(1),
 });
 
-/**
- * Spécification d'un lot d'entraînement.
- *
- * Les bornes ne sont pas décoratives : `samples` plafonné évite qu'une faute de
- * frappe ne lance cinquante mille runs, et `workers` plafonné rappelle que le
- * parallélisme réel vient du pool d'agents, pas de ce nombre.
- */
-const trainingSpecSchema = z.object({
-  agentIds: z.array(z.string()).min(1).max(32),
-  promptTemplates: z.array(z.string().min(1).max(20_000)).min(1).max(200),
-  variables: z
-    .record(z.string().min(1).max(60), z.array(z.string().max(2000)).max(500))
-    .default({}),
-  samples: z.number().int().min(1).max(10_000),
-  workers: z.number().int().min(1).max(32).default(1),
-  maxAttempts: z.number().int().min(1).max(5).default(1),
-  toolWeights: z
-    .array(z.object({ tool: z.string().max(120), weight: z.number().min(0).max(1000) }))
-    .max(50)
-    .default([]),
-  timeoutSec: z.number().int().positive().max(86_400).nullable().default(null),
-  skillId: z.string().nullable().default(null),
-  grader: z
-    .object({ agentId: z.string(), promptTemplate: z.string().min(1).max(20_000) })
-    .nullable()
-    .default(null),
-});
-
-const trainingBatchSchema = z.object({
-  name: z.string().min(1).max(120),
-  description: z.string().max(2000).default(''),
-  spec: trainingSpecSchema,
-});
-
-/**
- * Modification d'un lot.
- *
- * Un schéma explicite plutôt que `patchOf` : la spécification se remplace en
- * bloc, jamais champ par champ. Un lot dont on changerait le nombre
- * d'échantillons sans revoir les gabarits produirait un plan incohérent avec
- * les échantillons déjà engendrés.
- */
-const trainingBatchPatchSchema = z.object({
-  name: z.string().min(1).max(120).optional(),
-  description: z.string().max(2000).optional(),
-  spec: trainingSpecSchema.optional(),
-});
-
-const trainingExportSchema = z.object({
-  format: z.enum(['sharegpt', 'openai', 'atropos', 'raw']),
-  dialect: z.enum(TOOL_CALL_DIALECTS as [ToolCallDialect, ...ToolCallDialect[]]).optional(),
-  batchId: z.string().nullable().optional(),
-  runIds: z.array(z.string()).max(2000).optional(),
-  tokenBudget: z.number().int().min(100).max(1_000_000).nullable().optional(),
-  onlySucceeded: z.boolean().optional(),
-  includeThinking: z.boolean().optional(),
-  requireToolCalls: z.boolean().optional(),
-});
-
 const connectorSearchSchema = z.object({
   q: z.string().max(200).optional(),
   category: z.string().max(60).optional(),
@@ -386,66 +292,20 @@ const settingsSchema = z.object({
   fullTrajectoryCapture: z.boolean().optional(),
 });
 
-/**
- * Schéma de mise à jour partielle : chaque champ devient optionnel ET perd sa
- * valeur par défaut.
- *
- * `.partial()` seul ne suffit pas — zod applique quand même les defaults des
- * champs absents, si bien qu'un PATCH `{ archived: true }` renverrait aussi
- * `model: 'sonnet'`, `cliAgent: null`, `color: '#22d3ee'`… et écraserait la
- * configuration de l'agent. Ici, un champ absent de la requête reste absent du
- * patch, donc inchangé côté service.
- */
-function patchOf<T extends z.ZodRawShape>(schema: z.ZodObject<T>) {
-  const shape: Record<string, z.ZodType> = {};
-  for (const [key, rawField] of Object.entries(schema.shape)) {
-    const field = rawField as z.ZodType;
-    shape[key] = (
-      field instanceof z.ZodDefault ? (field.removeDefault() as z.ZodType) : field
-    ).optional();
-  }
-  return z.object(shape);
-}
-
-/** Exécute un appel de service dont les erreurs sont des erreurs de validation métier (→ 400). */
-function badRequestOn<T>(fn: () => T): T {
-  try {
-    return fn();
-  } catch (err) {
-    const wrapped = new Error(err instanceof Error ? err.message : String(err));
-    (wrapped as Error & { statusCode?: number }).statusCode = 400;
-    throw wrapped;
-  }
-}
-
-/**
- * Erreur de spécification d'un lot → 400.
- *
- * Une spécification refusée (agent inconnu, moteur tmux, gabarit vide) est une
- * faute de la requête, pas une panne : la distinguer d'un 500 évite qu'un
- * message utile se perde dans une trace de pile.
- */
-function trainingError(
-  reply: { code: (n: number) => { send: (body: unknown) => unknown } },
-  err: unknown,
-): unknown {
-  if (err instanceof TrainingError) return reply.code(400).send({ error: err.message });
-  throw err;
-}
-
-function parseOr400<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    const err = new Error(
-      parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(' ; '),
-    );
-    (err as Error & { statusCode?: number }).statusCode = 400;
-    throw err;
-  }
-  return parsed.data;
-}
+/* Le contrat des services vit dans `routes-shared`, d'où tous les modules le
+   tirent ; il reste réexporté ici pour ne pas casser les appelants. */
+export type { Services } from './routes-shared.ts';
 
 export function registerRoutes(app: FastifyInstance, s: Services): void {
+  /*
+   * Domaines extraits.
+   *
+   * Le découpage est structurel : les blocs ont été déplacés tels quels, et la
+   * table de routage est identique avant et après — vérifié, plutôt que relu.
+   */
+  registerAdminRoutes(app, s);
+  registerTrainingRoutes(app, s);
+
   // -- Santé & vue d'ensemble -------------------------------------------------
 
   app.get('/api/health', async () => ({ ok: true }));
@@ -662,6 +522,37 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
       return reply
         .code(status)
         .send({ error: err instanceof Error ? err.message : 'Livraison impossible' });
+    }
+  });
+
+  /**
+   * Publie la branche d'un run et rend le lien de merge request.
+   *
+   * 🔒 Le push emprunte les identifiants git de la machine, jamais un jeton
+   * stocké par Maestro — et il ne pousse que la branche nommée, jamais en force.
+   * La merge request n'est pas créée par API : la forge propose déjà son lien
+   * dans la sortie du push, et le fabriquer aurait exigé un jeton, l'URL de
+   * l'instance et le chemin du projet.
+   */
+  app.post('/api/runs/:id/push', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = s.store.getRun(id);
+    if (!run) return reply.code(404).send({ error: 'Run introuvable' });
+    const agent = s.agents.get(run.agentId);
+    if (!agent) return reply.code(404).send({ error: 'Agent introuvable' });
+
+    const body = parseOr400(
+      z.object({
+        branch: z.string().min(1).max(200),
+        remote: z.string().min(1).max(80).default('origin'),
+      }),
+      req.body ?? {},
+    );
+    try {
+      return await pushBranch(agent.workspaceDir, body);
+    } catch (err) {
+      if (err instanceof WorkspaceGitError) return reply.code(400).send({ error: err.message });
+      throw err;
     }
   });
 
@@ -1067,229 +958,6 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
       agents: s.store.countRows('agents'),
       runsTotal: s.store.countRows('runs'),
     });
-  });
-
-  // -- Jetons d'accès ----------------------------------------------------------------------------
-
-  app.get('/api/access-tokens', async () => s.store.listAccessTokens());
-
-  /**
-   * Crée un jeton nommé.
-   *
-   * 🔒 La valeur n'est renvoyée qu'ici, une seule fois : seule son empreinte est
-   * conservée. La réafficher ensuite supposerait de la stocker en clair, ce qui
-   * annulerait tout l'intérêt.
-   */
-  app.post('/api/access-tokens', async (req, reply) => {
-    const body = parseOr400(z.object({ label: z.string().trim().min(1).max(60) }), req.body);
-    const value = generateToken();
-    const token = {
-      id: makeId('tok'),
-      label: body.label,
-      preview: tokenPreview(value),
-      createdAt: nowIso(),
-      lastUsedAt: null,
-      revokedAt: null,
-    };
-    s.store.insertAccessToken(token, hashToken(value));
-    s.bus.log('warn', 'auth', `Jeton d'accès « ${token.label} » créé`);
-    reply.code(201);
-    return { token, value };
-  });
-
-  app.post('/api/access-tokens/:id/revoke', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    if (!s.store.revokeAccessToken(id, nowIso())) {
-      return reply.code(404).send({ error: 'Jeton introuvable ou déjà révoqué' });
-    }
-    // Trace en avertissement : révoquer un accès mérite d'apparaître au journal.
-    s.bus.log('warn', 'auth', `Jeton d'accès ${id} révoqué`);
-    return { ok: true };
-  });
-
-  // -- Entretien de la base ----------------------------------------------------------------------
-
-  /** État : taille de la base, rétention en vigueur, sauvegardes disponibles. */
-  app.get('/api/maintenance', async () => ({
-    databaseBytes: s.store.databaseBytes(),
-    retentionDays: s.store.getSettings().retentionDays,
-    backups: s.maintenance.listBackups(),
-  }));
-
-  app.post('/api/maintenance/prune', async () => s.maintenance.prune());
-
-  app.post('/api/maintenance/backup', async (_req, reply) => {
-    try {
-      reply.code(201);
-      return s.maintenance.backup();
-    } catch (err) {
-      // Disque plein ou répertoire non inscriptible : le dire, plutôt qu'une
-      // trace de pile qui ne mentionne pas la sauvegarde.
-      return reply.code(500).send({
-        error: `Sauvegarde impossible : ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-  });
-
-  // -- Entraînement (MLOps) --------------------------------------------------------------------
-
-  app.get('/api/training/dialects', async () => listDialects());
-
-  app.get('/api/training/batches', async () => s.training.list());
-
-  app.post('/api/training/batches', async (req, reply) => {
-    const input = parseOr400(trainingBatchSchema, req.body);
-    try {
-      reply.code(201);
-      return s.training.create({
-        name: input.name,
-        description: input.description,
-        spec: { ...DEFAULT_SPEC, ...input.spec },
-      });
-    } catch (err) {
-      return trainingError(reply, err);
-    }
-  });
-
-  /**
-   * Banc de non-régression : deux lots, un écart.
-   *
-   * Les identifiants passent en requête et non dans le chemin : c'est une
-   * lecture croisée entre deux ressources, aucune des deux n'étant le parent de
-   * l'autre.
-   */
-  app.get('/api/training/compare', async (req, reply) => {
-    const { baseline, candidate } = req.query as { baseline?: string; candidate?: string };
-    if (!baseline || !candidate) {
-      return reply.code(400).send({ error: 'Paramètres « baseline » et « candidate » requis' });
-    }
-    const comparison = s.training.compare(baseline, candidate);
-    if (!comparison) return reply.code(404).send({ error: 'Lot introuvable' });
-    return { ...comparison, verdict: summarise(comparison) };
-  });
-
-  app.get('/api/training/batches/:id', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const batch = s.training.get(id);
-    if (!batch) return reply.code(404).send({ error: 'Lot introuvable' });
-    const { items, truncated, total } = s.training.itemPage(id);
-    return { batch, items, itemsTruncated: truncated, itemTotal: total };
-  });
-
-  app.patch('/api/training/batches/:id', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const patch = parseOr400(trainingBatchPatchSchema, req.body);
-    try {
-      const batch = s.training.update(id, {
-        name: patch.name,
-        description: patch.description,
-        ...(patch.spec ? { spec: { ...DEFAULT_SPEC, ...patch.spec } } : {}),
-      });
-      if (!batch) return reply.code(404).send({ error: 'Lot introuvable' });
-      return batch;
-    } catch (err) {
-      return trainingError(reply, err);
-    }
-  });
-
-  app.delete('/api/training/batches/:id', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    if (!s.training.remove(id)) return reply.code(404).send({ error: 'Lot introuvable' });
-    return { ok: true };
-  });
-
-  app.post('/api/training/batches/:id/start', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    try {
-      return s.training.start(id);
-    } catch (err) {
-      return trainingError(reply, err);
-    }
-  });
-
-  app.post('/api/training/batches/:id/pause', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    if (!s.training.pause(id)) return reply.code(409).send({ error: 'Lot non interruptible' });
-    return { ok: true };
-  });
-
-  app.post('/api/training/batches/:id/cancel', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    if (!s.training.cancel(id)) return reply.code(404).send({ error: 'Lot introuvable' });
-    return { ok: true };
-  });
-
-  app.post('/api/training/items/:id/score', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const body = parseOr400(z.object({ score: z.number().min(0).max(1) }), req.body);
-    const item = s.training.scoreItem(id, body.score);
-    if (!item) return reply.code(404).send({ error: 'Échantillon introuvable' });
-    return item;
-  });
-
-  app.get('/api/training/runs/:id/trajectory', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const { thinking } = req.query as { thinking?: string };
-    const trajectory = s.training.trajectoryOf(id, thinking === '1');
-    if (!trajectory) return reply.code(404).send({ error: 'Run introuvable' });
-    return trajectory;
-  });
-
-  /** Aperçu : compte, écarts et compression, sans produire le fichier. */
-  app.post('/api/training/export/preview', async (req) => {
-    const input = parseOr400(trainingExportSchema, req.body);
-    return (await s.training.buildDataset(input)).preview;
-  });
-
-  /**
-   * Téléchargement du jeu de données.
-   *
-   * En `application/x-ndjson` et non en JSON : la réponse n'est pas un document
-   * unique mais une suite de lignes indépendantes, et c'est ce que les
-   * chargeurs de jeux de données attendent.
-   */
-  app.post('/api/training/export', async (req, reply) => {
-    const input = parseOr400(trainingExportSchema, req.body);
-    const { lines } = await s.training.buildDataset(input);
-    const stamp = nowIso().slice(0, 19).replaceAll(':', '-');
-    reply
-      .header('content-type', 'application/x-ndjson; charset=utf-8')
-      .header(
-        'content-disposition',
-        `attachment; filename="maestro-${input.format}-${stamp}.jsonl"`,
-      );
-    return toJsonl(lines);
-  });
-
-  /**
-   * Publie la branche d'un run et rend le lien de merge request.
-   *
-   * 🔒 Le push emprunte les identifiants git de la machine, jamais un jeton
-   * stocké par Maestro — et il ne pousse que la branche nommée, jamais en force.
-   * La merge request n'est pas créée par API : la forge propose déjà son lien
-   * dans la sortie du push, et le fabriquer aurait exigé un jeton, l'URL de
-   * l'instance et le chemin du projet.
-   */
-  app.post('/api/runs/:id/push', async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const run = s.store.getRun(id);
-    if (!run) return reply.code(404).send({ error: 'Run introuvable' });
-    const agent = s.agents.get(run.agentId);
-    if (!agent) return reply.code(404).send({ error: 'Agent introuvable' });
-
-    const body = parseOr400(
-      z.object({
-        branch: z.string().min(1).max(200),
-        remote: z.string().min(1).max(80).default('origin'),
-      }),
-      req.body ?? {},
-    );
-    try {
-      return await pushBranch(agent.workspaceDir, body);
-    } catch (err) {
-      if (err instanceof WorkspaceGitError) return reply.code(400).send({ error: err.message });
-      throw err;
-    }
   });
 
   // -- tmux --------------------------------------------------------------------------------------
