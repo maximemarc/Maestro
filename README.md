@@ -342,6 +342,46 @@ Discord, mrkdwn pour Slack ; une commande corrigée l'est sur les trois.
   interactions. Sur ces deux canaux, la demande est notifiée et renvoie vers
   l'interface
 
+### Banc de non-régression
+
+Modifier le CLAUDE.md d'un agent ou son modèle était un acte de foi. Rejoue le
+même jeu de prompts avant et après, puis compare les deux lots : l'écart se lit
+cas par cas — score, mais aussi coût, parce qu'un agent qui gagne deux centièmes
+en doublant sa facture n'est pas une amélioration.
+
+- Appariement **sur le prompt**, jamais sur l'index : deux lots sans prompt
+  commun sont refusés plutôt que comparés à tort
+- Un écart inférieur à 0,05 est déclaré stable — un juge ne rend pas deux fois
+  la même note, et voir des progrès dans le bruit ferait décider à tort
+- Un échantillon non noté est « incomparable », pas « stable » : le ranger dans
+  les stables masquerait la régression qu'on cherche
+
+### Exploitation
+
+- **Rétention** des transcripts et du journal, en jours. Illimitée par défaut :
+  l'activer détruit des données, c'est une décision qu'on prend sur un chiffre —
+  la taille réelle de la base est affichée à côté du réglage
+- **Sauvegarde à chaud** (`VACUUM INTO`), depuis l'interface ou en ligne de
+  commande (`npm run backup`), rotation sur sept. 🔒 Une sauvegarde contient tout,
+  clés MCP comprises : le répertoire est en 0700
+- **Métriques Prometheus** sur `/api/metrics/prometheus` — file d'attente,
+  approbations en attente, coût du jour, taille de la base
+- **Priorité de file** : un lot d'entraînement ne peut jamais prendre la
+  dernière place du plafond de concurrence. La priorité se déduit de l'origine,
+  parce que c'est elle qui dit si quelqu'un attend devant son écran
+
+### Accès et traçabilité
+
+- **Jetons nommés** : un par personne ou par script, révocables
+  individuellement et avec effet immédiat. Une approbation dit désormais _qui_ a
+  tranché, et plus seulement par quel canal
+- 🔒 Seule l'empreinte SHA-256 est stockée — un vol de base ne donne aucun accès,
+  et c'est pourquoi la valeur n'est montrée qu'une fois
+- 🔒 **Secrets des serveurs MCP chiffrés au repos** (AES-256-GCM), clé dans un
+  fichier séparé : la clé et la base ne voyagent pas ensemble
+- Le jeton principal reste hors de portée de la révocation : c'est lui qui
+  permet de reprendre la main
+
 ### Analytique & garde-fous
 
 - Tokens et coûts par jour / agent / modèle, statistiques par agent
