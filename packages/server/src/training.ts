@@ -213,9 +213,21 @@ export class TrainingService {
             .map((run) => ({ runId: run.id, score: this.store.scoreForRun(run.id) }));
 
     const inputs: ExportInput[] = [];
+    /*
+     * Runs disparus, rendus compte et non passés sous silence.
+     *
+     * Le cas arrive : supprimer un agent supprime ses runs, et les échantillons
+     * du lot gardent un identifiant orphelin. Les ignorer discrètement rendait
+     * un jeu de données plus petit que le lot, sans que rien n'explique l'écart
+     * — alors que tous les autres motifs de rejet sont, eux, rapportés.
+     */
+    const missing: Array<{ runId: string; reason: string }> = [];
     for (const ref of refs) {
       const run = this.store.getRun(ref.runId);
-      if (!run) continue;
+      if (!run) {
+        missing.push({ runId: ref.runId, reason: 'run supprimé (agent effacé ?)' });
+        continue;
+      }
       const agent = this.agents.get(run.agentId);
       const trajectory = buildTrajectory(run, this.store.listRunEvents(run.id), {
         agentName: agent?.name ?? run.agentId,
@@ -225,7 +237,7 @@ export class TrainingService {
       inputs.push({ trajectory, score: ref.score });
     }
 
-    return buildExport(
+    const result = buildExport(
       {
         format: request.format,
         dialect,
@@ -235,6 +247,10 @@ export class TrainingService {
       },
       inputs,
     );
+    // Les runs introuvables viennent en tête : c'est l'écart le moins
+    // explicable pour qui relit l'aperçu, donc celui qu'il faut voir d'abord.
+    result.preview.skipped = [...missing, ...result.preview.skipped];
+    return result;
   }
 
   /** Trajectoire d'un run seul, pour l'inspecter avant d'exporter un lot. */
@@ -709,14 +725,72 @@ export class TrainingService {
  * répond parfois sur 10 ou en pourcentage malgré la consigne.
  */
 export function parseScore(text: string): number | null {
-  const matches = [...text.matchAll(/-?\d+(?:[.,]\d+)?/g)].map((m) => m[0]);
-  const last = matches.at(-1);
+  /*
+   * La conclusion d'abord.
+   *
+   * La consigne demande un nombre sur une ligne seule ; quand le juge la suit,
+   * lire cette ligne évite tout le bruit du commentaire. On ne retombe sur le
+   * texte entier que si la dernière ligne ne porte aucun nombre.
+   */
+  const lines = text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const lastLine = lines.at(-1);
+  return (lastLine ? scoreIn(lastLine) : null) ?? scoreIn(text);
+}
+
+/**
+ * Lit un score dans un fragment de texte.
+ *
+ * La fraction est cherchée avant tout nombre isolé, et c'est le cœur du
+ * problème : « 0.8/1 », « 0.4 sur 1 » et « 7/10 » sont les formulations
+ * spontanées d'un juge, malgré la consigne. Prendre le dernier nombre y
+ * retenait le dénominateur — donc 1.0 pour une note basse, une récompense
+ * maximale attribuée en silence, et un jeu de données de renforcement dont le
+ * signal est inversé sur une part des échantillons.
+ */
+function scoreIn(fragment: string): number | null {
+  const fraction = [
+    ...fragment.matchAll(/(\d+(?:[.,]\d+)?)\s*(?:\/|sur)\s*(\d+(?:[.,]\d+)?)/gi),
+  ].at(-1);
+  if (fraction?.[1] && fraction[2]) {
+    const numerator = Number.parseFloat(fraction[1].replace(',', '.'));
+    const denominator = Number.parseFloat(fraction[2].replace(',', '.'));
+    if (Number.isFinite(numerator)) {
+      /*
+       * Dénominateur inutilisable : on garde le numérateur.
+       *
+       * Retomber sur « le dernier nombre du fragment » retiendrait justement ce
+       * dénominateur — le défaut même qu'on corrige ici. « 0.5 sur 0 » n'a pas
+       * de sens, mais le juge a bien voulu dire 0.5.
+       */
+      if (denominator > 0) return clampScore(numerator / denominator);
+      return scaleLoneNumber(numerator);
+    }
+  }
+
+  const last = [...fragment.matchAll(/-?\d+(?:[.,]\d+)?/g)].map((m) => m[0]).at(-1);
   if (last === undefined) return null;
   const value = Number.parseFloat(last.replace(',', '.'));
   if (!Number.isFinite(value)) return null;
+  return scaleLoneNumber(value);
+}
+
+/**
+ * Devine l'échelle d'un nombre isolé.
+ *
+ * Un juge répond parfois sur 10 ou en pourcentage sans le dire. Refuser ces
+ * réponses coûterait plus d'échantillons que la déduction n'en dégrade.
+ */
+function scaleLoneNumber(value: number): number {
   if (value < 0) return 0;
   if (value <= 1) return value;
   if (value <= 10) return value / 10;
   if (value <= 100) return value / 100;
   return 1;
+}
+
+function clampScore(value: number): number {
+  return Math.min(1, Math.max(0, value));
 }

@@ -288,6 +288,13 @@ exporter au format d'un outil de fine-tuning.
 - La source peut être un lot **ou les runs récents de l'instance** : le travail
   réel fait souvent les meilleures trajectoires
 
+> 🔒 **Un jeu de données exporté contient les prompts et les retours d'outils
+> intégraux.** S'ils portent sur des dossiers réels, ce sont des données
+> personnelles en clair — noms, SIRET, montants nominatifs, extraits de liasse.
+> Le fichier quitte Maestro et part généralement ailleurs (dépôt de fine-tuning,
+> service d'entraînement tiers) : le relire avant de le transmettre, et
+> pseudonymiser si le corpus doit sortir de l'entreprise.
+
 > ⚠️ Par défaut un retour d'outil est raccourci à 1 500 caractères — le
 > transcript est fait pour être lu. Pour de l'entraînement, ce raccourci devient
 > une erreur d'étiquetage. Le réglage **« Capture intégrale des retours

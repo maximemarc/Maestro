@@ -7,6 +7,7 @@
  * exporte, ce sont des runs — ceux d'un lot, ou ceux du travail réel.
  */
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { Link } from 'react-router-dom';
 import { Brain, Download, Eye, Flask, Pause, Play, Plus, Prohibit } from '@phosphor-icons/react';
 import type {
   ToolCallDialect,
@@ -742,16 +743,23 @@ function BatchDetail(props: {
                         corriger un score aberrant est le geste le plus utile
                         qu'un humain puisse faire sur un jeu de données. */}
                     <div className="row gap-1 items-baseline">
+                      {/* Enregistrement à la sortie du champ, pas à la frappe :
+                          saisir « 0.75 » persistait 0, puis 0.7, puis 0.75, et
+                          diffusait trois événements — des scores faux le temps
+                          de la frappe, dans les données mêmes qu'on exporte. */}
                       <input
                         className="input w-sm"
                         type="number"
                         min={0}
                         max={1}
                         step={0.1}
-                        value={item.score ?? ''}
-                        onChange={(e) => {
+                        defaultValue={item.score ?? ''}
+                        key={`${item.id}-${item.score ?? 'vide'}`}
+                        onBlur={(e) => {
                           const value = Number.parseFloat(e.target.value);
-                          if (Number.isFinite(value)) void score(item, value);
+                          if (Number.isFinite(value) && value !== item.score) {
+                            void score(item, value);
+                          }
                         }}
                         aria-label={`Score de l’échantillon ${item.index}`}
                       />
@@ -762,9 +770,9 @@ function BatchDetail(props: {
                   </td>
                   <td>
                     {item.runId ? (
-                      <a className="btn ghost sm" href={`/runs/${item.runId}`}>
+                      <Link className="btn ghost sm" to={`/runs/${item.runId}`}>
                         Voir
-                      </a>
+                      </Link>
                     ) : (
                       '—'
                     )}
@@ -947,6 +955,19 @@ function ExportPanel(props: {
             Télécharger le JSONL
           </button>
         </div>
+
+        {/* Un jeu de données exporté sort de Maestro et part généralement
+            ailleurs — dépôt de fine-tuning, service d'entraînement tiers. Il
+            contient les prompts et les retours d'outils tels quels, donc
+            potentiellement des données personnelles issues du travail réel. Le
+            dire ici, au moment du geste, et non dans une documentation que
+            personne ne relit avant de cliquer. */}
+        <p className="text-faint text-xs mt-3">
+          ⚠️ Le fichier contient les prompts et les retours d’outils intégraux des runs retenus —
+          donc, s’ils portent sur des dossiers réels, des données personnelles en clair (noms,
+          SIRET, montants nominatifs). Vérifie-le avant de le transmettre à un service
+          d’entraînement tiers.
+        </p>
       </div>
 
       <div className="card">

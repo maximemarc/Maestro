@@ -475,6 +475,39 @@ describe('lecture du score d’un juge', () => {
     expect(parseScore('3 appels d’outils, tout est correct. 0.9')).toBeCloseTo(0.9);
   });
 
+  /*
+   * Le piège central : « 0.8/1 » et « 0.4 sur 1 » sont les formulations
+   * spontanées d'un juge malgré la consigne. Retenir le dénominateur y donnait
+   * 1.0 — une récompense maximale sur une note basse, attribuée en silence, qui
+   * inverse le signal d'apprentissage sur une part du jeu de données.
+   */
+  it('lit une fraction et non son dénominateur', () => {
+    expect(parseScore('0.8/1')).toBeCloseTo(0.8);
+    expect(parseScore('Score : 0.8 sur 1')).toBeCloseTo(0.8);
+    expect(parseScore('3 outils utilisés, note 0.4 sur 1')).toBeCloseTo(0.4);
+  });
+
+  it('ramène une fraction sur dix dans l’intervalle', () => {
+    expect(parseScore('Note finale : 7/10')).toBeCloseTo(0.7);
+    expect(parseScore('Correct. 85/100')).toBeCloseTo(0.85);
+  });
+
+  it('ignore un dénominateur nul plutôt que de diviser par zéro', () => {
+    expect(parseScore('0.5 sur 0')).toBeCloseTo(0.5);
+  });
+
+  it('privilégie la conclusion sur le commentaire', () => {
+    expect(parseScore('J’ai compté 3 outils et 12 fichiers.\n0.6')).toBeCloseTo(0.6);
+  });
+
+  it('retombe sur le texte entier si la dernière ligne ne chiffre rien', () => {
+    expect(parseScore('Score : 0.45\nRien à ajouter.')).toBeCloseTo(0.45);
+  });
+
+  it('borne une fraction supérieure à un', () => {
+    expect(parseScore('12/10')).toBe(1);
+  });
+
   it('ramène une note sur 10 dans l’intervalle', () => {
     expect(parseScore('Bon travail. 8')).toBeCloseTo(0.8);
   });
@@ -646,5 +679,19 @@ describe('export d’un lot', () => {
   it('rend une trajectoire nulle pour un run inconnu', () => {
     const { service } = setup(['a1']);
     expect(service.trajectoryOf('run_fantome', false)).toBeNull();
+  });
+
+  /*
+   * Supprimer un agent supprime ses runs ; les échantillons du lot gardent un
+   * identifiant orphelin. L'écart doit apparaître dans l'aperçu, sans quoi le
+   * jeu de données est plus petit que le lot sans explication.
+   */
+  it('rapporte les runs disparus au lieu de les ignorer', () => {
+    const { service } = setup(['a1']);
+    const result = service.buildDataset({ format: 'sharegpt', runIds: ['run_disparu'] });
+    expect(result.lines).toHaveLength(0);
+    expect(result.preview.skipped).toEqual([
+      { runId: 'run_disparu', reason: 'run supprimé (agent effacé ?)' },
+    ]);
   });
 });
