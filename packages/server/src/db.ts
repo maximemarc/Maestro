@@ -33,6 +33,7 @@ import type {
   TrainingItem,
   TrainingItemStatus,
 } from '@maestro/shared';
+import { decryptMap, encryptMap, passthroughBox, type SecretBox } from './secrets.ts';
 import { makeId, nowIso, safeJsonParse } from './util.ts';
 
 const SCHEMA = `
@@ -402,7 +403,13 @@ function rowToAgent(r: SqlRow): AgentConfig {
   };
 }
 
-function rowToMcpServer(r: SqlRow): McpServerDef {
+/**
+ * Deserialise un serveur MCP.
+ *
+ * Prend le coffre en argument : les valeurs sensibles sont chiffrees en base,
+ * et une valeur heritee en clair traverse inchangee.
+ */
+function rowToMcpServer(r: SqlRow, secrets: SecretBox): McpServerDef {
   return {
     id: str(r.id),
     slug: str(r.slug),
@@ -413,9 +420,9 @@ function rowToMcpServer(r: SqlRow): McpServerDef {
     transport: strOrNull(r.transport) as McpServerDef['transport'],
     command: strOrNull(r.command),
     args: safeJsonParse<string[]>(str(r.args ?? '[]'), []),
-    env: safeJsonParse<Record<string, string>>(str(r.env ?? '{}'), {}),
+    env: decryptMap(secrets, safeJsonParse<Record<string, string>>(str(r.env ?? '{}'), {})),
     url: strOrNull(r.url),
-    headers: safeJsonParse<Record<string, string>>(str(r.headers ?? '{}'), {}),
+    headers: decryptMap(secrets, safeJsonParse<Record<string, string>>(str(r.headers ?? '{}'), {})),
     tools: safeJsonParse<McpServerDef['tools']>(str(r.tools ?? '[]'), []),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
@@ -626,7 +633,17 @@ function rowToLog(r: SqlRow): LogLine {
 export class Store {
   private db: DatabaseSync;
 
-  constructor(dbPath: string) {
+  /**
+   * Coffre à secrets.
+   *
+   * Injecte plutôt que construit : le Store ne connaît que son chemin de base,
+   * pas le repertoire de donnees ou vit la cle. Absent, on retombe sur un coffre
+   * neutre — c'est le cas des tests, qui travaillent en memoire.
+   */
+  private secrets: SecretBox;
+
+  constructor(dbPath: string, secrets: SecretBox = passthroughBox()) {
+    this.secrets = secrets;
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA foreign_keys = ON;');
@@ -1496,21 +1513,21 @@ export class Store {
   // --- Serveurs MCP -------------------------------------------------------
 
   listMcpServers(): McpServerDef[] {
-    return (this.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() as SqlRow[]).map(
-      rowToMcpServer,
+    return (this.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() as SqlRow[]).map((r) =>
+      rowToMcpServer(r, this.secrets),
     );
   }
 
   getMcpServer(id: string): McpServerDef | null {
     const row = this.db.prepare('SELECT * FROM mcp_servers WHERE id = ?').get(id) as
       SqlRow | undefined;
-    return row ? rowToMcpServer(row) : null;
+    return row ? rowToMcpServer(row, this.secrets) : null;
   }
 
   getMcpServerBySlug(slug: string): McpServerDef | null {
     const row = this.db.prepare('SELECT * FROM mcp_servers WHERE slug = ?').get(slug) as
       SqlRow | undefined;
-    return row ? rowToMcpServer(row) : null;
+    return row ? rowToMcpServer(row, this.secrets) : null;
   }
 
   upsertMcpServer(def: McpServerDef): void {
@@ -1537,9 +1554,10 @@ export class Store {
         def.transport,
         def.command,
         JSON.stringify(def.args),
-        JSON.stringify(def.env),
+        // 🔒 Chiffré à l'écriture : la base ne contient plus les clés en clair.
+        JSON.stringify(encryptMap(this.secrets, def.env)),
         def.url,
-        JSON.stringify(def.headers),
+        JSON.stringify(encryptMap(this.secrets, def.headers)),
         JSON.stringify(def.tools),
         def.createdAt,
         def.updatedAt,

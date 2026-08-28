@@ -17,6 +17,7 @@ import { Bus } from './bus.ts';
 import { loadConfig } from './config.ts';
 import { ConnectorRegistry } from './connectors.ts';
 import { Store } from './db.ts';
+import { createSecretBox } from './secrets.ts';
 import { TaskService } from './kanban.ts';
 import { Metrics } from './metrics.ts';
 import { ApprovalBroker } from './permissions.ts';
@@ -39,7 +40,13 @@ import { TrainingService } from './training.ts';
 import { nowIso } from './util.ts';
 
 const config = loadConfig();
-const store = new Store(config.dbPath);
+/*
+ * 🔒 Les secrets des serveurs MCP sont chiffrés en base, avec une clé conservée
+ * dans un fichier séparé. Séparer la clé de la base est l'essentiel : les deux
+ * ne voyagent pas ensemble, et une sauvegarde copiée ne suffit plus à divulguer
+ * les jetons qu'elle contient.
+ */
+const store = new Store(config.dbPath, createSecretBox(config.dataDir));
 const bus = new Bus(store);
 const startedAt = nowIso();
 
