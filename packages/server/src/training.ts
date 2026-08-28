@@ -32,6 +32,7 @@ import type { Store } from './db.ts';
 import type { RunEngine } from './runs.ts';
 import { type ExportInput, type ExportResult, buildExport } from './training-export.ts';
 import { DEFAULT_DIALECT, isToolCallDialect } from './training-parsers.ts';
+import { type BatchComparison, compareBatches } from './training-compare.ts';
 import { buildTrajectory } from './training-trajectory.ts';
 import { makeId, nowIso } from './util.ts';
 
@@ -212,6 +213,23 @@ export class TrainingService {
   /** Runs et scores d'un lot — ce que l'export va lire. */
   runRefs(batchId: string): Array<{ runId: string; score: number | null }> {
     return this.store.listTrainingRunRefs(batchId);
+  }
+
+  /**
+   * Compare deux lots — le banc de non-régression.
+   *
+   * Modifier le CLAUDE.md d'un agent ou son modèle est sinon un acte de foi :
+   * rien ne dit si l'agent s'améliore. Deux lots bâtis sur les mêmes prompts,
+   * exécutés avec deux configurations, et l'écart se lit cas par cas.
+   */
+  compare(baselineId: string, candidateId: string): BatchComparison | null {
+    const baseline = this.store.getTrainingBatch(baselineId);
+    const candidate = this.store.getTrainingBatch(candidateId);
+    if (!baseline || !candidate) return null;
+    return compareBatches(
+      { batch: baseline, items: this.items(baselineId) },
+      { batch: candidate, items: this.items(candidateId) },
+    );
   }
 
   // -- Export ----------------------------------------------------------------

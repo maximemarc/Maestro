@@ -43,6 +43,7 @@ import {
 } from './workspace-git.ts';
 import type { MaintenanceService } from './maintenance.ts';
 import { DEFAULT_SPEC, TrainingError, type TrainingService } from './training.ts';
+import { summarise } from './training-compare.ts';
 import { toJsonl } from './training-export.ts';
 import { TOOL_CALL_DIALECTS, listDialects } from './training-parsers.ts';
 import { nowIso } from './util.ts';
@@ -1095,6 +1096,23 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     } catch (err) {
       return trainingError(reply, err);
     }
+  });
+
+  /**
+   * Banc de non-régression : deux lots, un écart.
+   *
+   * Les identifiants passent en requête et non dans le chemin : c'est une
+   * lecture croisée entre deux ressources, aucune des deux n'étant le parent de
+   * l'autre.
+   */
+  app.get('/api/training/compare', async (req, reply) => {
+    const { baseline, candidate } = req.query as { baseline?: string; candidate?: string };
+    if (!baseline || !candidate) {
+      return reply.code(400).send({ error: 'Paramètres « baseline » et « candidate » requis' });
+    }
+    const comparison = s.training.compare(baseline, candidate);
+    if (!comparison) return reply.code(404).send({ error: 'Lot introuvable' });
+    return { ...comparison, verdict: summarise(comparison) };
   });
 
   app.get('/api/training/batches/:id', async (req, reply) => {

@@ -1337,3 +1337,49 @@ export interface TrainingItem {
   createdAt: string;
   endedAt: string | null;
 }
+
+/**
+ * Banc de non-regression : ce que rend la comparaison de deux lots.
+ *
+ * Le verdict est une phrase, pas un score : un banc dont il faut interpreter
+ * soi-meme les chiffres ne sert a rien — il doit dire s'il faut garder le
+ * changement.
+ */
+export interface ComparisonSide {
+  status: TrainingItemStatus;
+  score: number | null;
+  toolCallCount: number;
+  totalTokens: number;
+  costUsd: number;
+  runId: string | null;
+}
+
+export type CaseVerdict = 'amélioré' | 'dégradé' | 'stable' | 'incomparable';
+
+export interface CaseComparison {
+  index: number;
+  prompt: string;
+  baseline: ComparisonSide | null;
+  candidate: ComparisonSide | null;
+  scoreDelta: number | null;
+  verdict: CaseVerdict;
+}
+
+export interface BatchComparison {
+  comparable: boolean;
+  reason: string | null;
+  cases: CaseComparison[];
+  summary: {
+    improved: number;
+    regressed: number;
+    unchanged: number;
+    incomparable: number;
+    baselineMean: number | null;
+    candidateMean: number | null;
+    meanDelta: number | null;
+    costDelta: number;
+    tokenDelta: number;
+  };
+  /** Phrase de synthese, ajoutee par l'API. */
+  verdict: string;
+}

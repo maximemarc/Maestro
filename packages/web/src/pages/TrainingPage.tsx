@@ -19,6 +19,7 @@ import type {
   TrainingItem,
 } from '@maestro/shared';
 import { api, downloadTrainingExport } from '../lib/api';
+import { BatchComparePanel } from '../components/BatchComparePanel';
 import { fmtCost, fmtDateTime, fmtTokens } from '../lib/format';
 import { useStore } from '../lib/store';
 import {
@@ -164,7 +165,7 @@ export default function TrainingPage() {
   const loadTrainingItems = useStore((s) => s.loadTrainingItems);
   const notify = useStore((s) => s.notify);
 
-  const [tab, setTab] = useState<'batches' | 'export'>('batches');
+  const [tab, setTab] = useState<'batches' | 'export' | 'compare'>('batches');
   const [pageError, setPageError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -317,6 +318,12 @@ export default function TrainingPage() {
         >
           Export
         </button>
+        <button
+          className={`tab${tab === 'compare' ? ' active' : ''}`}
+          onClick={() => setTab('compare')}
+        >
+          Non-régression
+        </button>
       </div>
 
       {tab === 'batches' ? (
@@ -460,8 +467,10 @@ export default function TrainingPage() {
             )}
           </>
         )
-      ) : (
+      ) : tab === 'export' ? (
         <ExportPanel batches={batches} onError={setPageError} notify={notify} />
+      ) : (
+        <BatchComparePanel batches={batches} />
       )}
 
       {modalOpen && (

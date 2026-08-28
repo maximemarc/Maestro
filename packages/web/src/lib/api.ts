@@ -46,6 +46,7 @@ import type {
   StartRunRequest,
   TmuxSessionInfo,
   TokensByBucket,
+  BatchComparison,
   ToolCallDialectInfo,
   Trajectory,
   TrainingBatch,
@@ -437,6 +438,12 @@ export const api = {
   agentStats: () => request<AgentStats[]>('GET', '/api/metrics/agents'),
   tokensBy: (groupBy: 'day' | 'agent' | 'model', days = 30) =>
     request<TokensByBucket[]>('GET', `/api/metrics/tokens?groupBy=${groupBy}&days=${days}`),
+
+  compareTrainingBatches: (baseline: string, candidate: string) =>
+    request<BatchComparison>(
+      'GET',
+      `/api/training/compare?baseline=${encodeURIComponent(baseline)}&candidate=${encodeURIComponent(candidate)}`,
+    ),
 
   // Entretien de la base
   getMaintenance: () => request<MaintenanceState>('GET', '/api/maintenance'),
