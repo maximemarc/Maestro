@@ -8,7 +8,7 @@
  * ailleurs un travail qu'on venait volontairement d'arrêter.
  */
 import { describe, expect, it } from 'vitest';
-import { classifyFailure, extractRetryAfterMs } from './failure.ts';
+import { classifyFailure, classifySilentSuccess, extractRetryAfterMs } from './failure.ts';
 
 const NOW = Date.parse('2026-08-31T10:00:00.000Z');
 
@@ -103,6 +103,35 @@ describe('décisions internes de Maestro', () => {
     const verdict = classifyFailure({ message: 'rate limit', hint: 'budget', now: NOW });
     expect(verdict.klass).toBe('budget');
     expect(verdict.poisonsAccount).toBe(false);
+  });
+});
+
+describe('échec déguisé en succès', () => {
+  it('démasque le « Not logged in » rendu comme un résultat réussi', () => {
+    /* Observé en conditions réelles : lancé sur un profil non authentifié, le
+       SDK rend un résultat de sous-type `success` dont le texte est ce message,
+       sans consommer un seul token. Sans ce garde-fou, le run finissait vert et
+       aucun repli ne se déclenchait. */
+    expect(classifySilentSuccess('Not logged in · Please run /login', 0)).toBe('auth');
+  });
+
+  it('démasque une limite d’usage rendue de la même façon', () => {
+    expect(classifySilentSuccess('Claude AI usage limit reached', 0)).toBe('quota');
+  });
+
+  it('laisse passer un vrai résultat, même s’il parle de limites', () => {
+    // Une réponse qui a coûté des tokens est une vraie réponse, quel que soit son texte.
+    expect(
+      classifySilentSuccess('Voici comment gérer un rate limit dans ton code…', 4200),
+    ).toBeNull();
+  });
+
+  it('ne requalifie pas un texte sans signal reconnu', () => {
+    expect(classifySilentSuccess('Terminé.', 0)).toBeNull();
+  });
+
+  it('laisse passer un résultat vide', () => {
+    expect(classifySilentSuccess('', 0)).toBeNull();
   });
 });
 

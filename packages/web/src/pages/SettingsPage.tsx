@@ -91,6 +91,7 @@ export default function SettingsPage() {
   };
 
   const notify = useStore((s) => s.notify);
+  const policies = useStore((s) => s.policies);
   const [notifyApprovals, setNotifyApprovalsState] = useState(() => notifyApprovalsEnabled());
   const [notifyDenied, setNotifyDenied] = useState(false);
 
@@ -206,6 +207,28 @@ export default function SettingsPage() {
                   />
                 </Field>
               </div>
+              <Field
+                label="Politique de résilience par défaut"
+                hint="Appliquée aux agents qui n'en déclarent pas. Sans elle, un run s'exécute sur l'environnement du serveur et s'arrête à la première limite d'usage."
+              >
+                <select
+                  className="input"
+                  value={settings.defaultResiliencePolicyId ?? ''}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      defaultResiliencePolicyId: e.target.value === '' ? null : e.target.value,
+                    })
+                  }
+                >
+                  <option value="">Aucune — environnement du serveur</option>
+                  {policies.map((policy) => (
+                    <option key={policy.id} value={policy.id}>
+                      {policy.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
               <label className="checkbox-row mb-3">
                 <input
                   type="checkbox"

@@ -15,6 +15,7 @@ import {
   MagnifyingGlass,
   Package,
   Plug,
+  PlugsConnected,
   PuzzlePiece,
   Radio,
   Robot,
@@ -58,6 +59,7 @@ const PipelinesPage = lazy(() => import('./pages/PipelinesPage'));
 const PluginsPage = lazy(() => import('./pages/PluginsPage'));
 const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
+const ProvidersPage = lazy(() => import('./pages/ProvidersPage'));
 const RagPage = lazy(() => import('./pages/RagPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 
@@ -85,6 +87,7 @@ const NAV: NavItem[] = [
   { to: '/approvals', icon: ShieldCheck, label: 'Approbations' },
   { to: '/skills', icon: Package, label: 'Skills' },
   { to: '/mcp', icon: Plug, label: 'MCP' },
+  { to: '/providers', icon: PlugsConnected, label: 'Fournisseurs' },
   { to: '/rag', icon: Books, label: 'RAG' },
   { to: '/routines', icon: Clock, label: 'Routines' },
   { to: '/pipelines', icon: FlowArrow, label: 'Pipelines' },
@@ -428,6 +431,7 @@ export default function App() {
                   <Route path="/approvals" element={<ApprovalsPage />} />
                   <Route path="/skills" element={<SkillsPage />} />
                   <Route path="/mcp" element={<McpPage />} />
+                  <Route path="/providers" element={<ProvidersPage />} />
                   <Route path="/rag" element={<RagPage />} />
                   <Route path="/routines" element={<RoutinesPage />} />
                   <Route path="/pipelines" element={<PipelinesPage />} />

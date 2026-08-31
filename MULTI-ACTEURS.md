@@ -206,5 +206,77 @@ maintenant la lecture recodée et compare sans casse ni diacritiques.
 
 - **A2** — outils de contrôle. Le point dur inchangé : run d'origine `external`
   et broker d'approbation appelé depuis l'outil.
-- **B** — moteur `cli` et adaptateurs.
+- ~~**B** — moteur `cli` et adaptateurs~~ — **livré**, voir ci-dessous.
 - **Abstraction canal** — extraction d'une interface de `telegram.ts`.
+
+---
+
+## Chantier B & manque n°1 — livrés le 31/08/2026
+
+Le chantier B et le manque n°1 (« multi-fournisseurs ») se sont avérés être le
+même travail : ce n'est pas l'énumération `AgentEngine` qui verrouillait Maestro
+sur un fournisseur, c'est l'absence de la notion de **compte**. Un run est
+désormais « une tentative sur un compte d'un fournisseur ».
+
+| Élément                                       | Fichier                                     |
+| --------------------------------------------- | ------------------------------------------- |
+| Vocabulaire partagé (comptes, classes, plans) | `packages/shared/src/providers.ts`          |
+| Classification des échecs                     | `packages/server/src/providers/failure.ts`  |
+| Routeur de repli (module pur)                 | `packages/server/src/providers/policy.ts`   |
+| Registre : comptes, politiques, santé, env    | `packages/server/src/providers/registry.ts` |
+| Adaptateur CLI générique (Codex, OpenCode)    | `packages/server/src/providers/cli.ts`      |
+| Adaptateur API HTTP (Anthropic / OpenAI)      | `packages/server/src/providers/http-api.ts` |
+| Sonde Claude & profils multi-comptes          | `packages/server/src/providers/claude.ts`   |
+| Résumés de reprise                            | `packages/server/src/providers/handoff.ts`  |
+| Boucle de tentatives                          | `packages/server/src/runs.ts`               |
+| Interface (comptes, politiques, onboarding)   | `packages/web/src/pages/ProvidersPage.tsx`  |
+
+**Décisions prises pendant la mise en œuvre**, là où l'analyse laissait le choix :
+
+- **Multi-comptes Claude** → `CLAUDE_CONFIG_DIR`, vérifié avant d'être codé : un
+  répertoire par compte isole entièrement l'authentification, donc le quota. Un
+  compte peut aussi être une clé d'API, désignée par le **nom** de sa variable
+  d'environnement — la valeur n'entre jamais en base, même règle que les clés
+  d'embeddings du RAG.
+- **Quota** → basculer plutôt qu'attendre. Attendre n'a lieu que si personne ne
+  peut prendre le relais, et seulement sur une réouverture _annoncée_. Les
+  formulations en prose (« resets at 5pm ») ne sont pas interprétées : sans
+  fuseau explicite, une heure devinée vaut moins qu'un backoff honnête.
+- **`claude-sdk` n'est pas un adaptateur** comme les autres : son exécution
+  reste dans `runs.ts`, tissée avec les serveurs MCP in-process, les plugins et
+  le broker d'approbations. Le déplacer derrière l'interface aurait fait
+  transiter la moitié du moteur en paramètre. Il respecte le même type de
+  sortie, ce qui suffit à la boucle de repli.
+- **Handoff** → seuil _et_ filet. Le filet n'est pas un repli théorique : quand
+  tous les comptes sont en quota, plus aucun modèle ne peut rédiger le résumé.
+  Le résumé mécanique, reconstruit depuis les événements, est marqué `degraded`.
+
+**Trouvés en conditions réelles, hors analyse initiale** — trois défauts qu'aucun
+test unitaire n'aurait produits :
+
+1. Un processus CLI tué laisse ses petits-enfants tenir les tuyaux ouverts :
+   l'événement `close` n'arrive jamais et le run reste suspendu indéfiniment.
+   Corrigé par un groupe de processus (`detached`) et un délai de grâce sur `exit`.
+2. `claude auth status` **sort en code 1** quand le profil n'est pas connecté,
+   tout en imprimant un JSON valide. Maestro concluait « la commande n'a pas
+   répondu » là où la réponse était « ce profil n'est pas authentifié » — deux
+   diagnostics qui n'appellent pas la même action.
+3. Le plus grave : lancé sur un profil non authentifié, le SDK rend un résultat
+   de sous-type **`success`** dont le texte est « Not logged in · Please run
+   /login », avec zéro token. Le run finissait **vert**, aucun repli ne se
+   déclenchait, et ce message était livré comme réponse de l'agent. Garde-fou
+   retenu : aucun appel de modèle n'est gratuit — un résultat qui n'a consommé ni
+   entrée, ni sortie, ni cache n'a pas été produit par un modèle, et son texte est
+   alors soumis à la classification.
+
+**Vérification de bout en bout** (instance jetable, port 4599) : une politique
+« compte non authentifié → compte serveur » sur un agent réel. Tentative 1
+classée `auth` en 4,5 s, résumé de reprise rédigé, tentative 2 réussie avec le
+résultat attendu, compte fautif automatiquement marqué `unauthenticated` — donc
+écarté d'emblée aux runs suivants.
+
+**Non vérifié** : les invocations non interactives de Codex et d'OpenCode, dont
+les binaires sont absents de la machine de développement. L'adaptateur, lui, est
+testé de bout en bout en le branchant sur `sh` — commande, arguments, découpage
+de la sortie, code de retour, stderr et interruption sont le même code quel que
+soit le binaire au bout.

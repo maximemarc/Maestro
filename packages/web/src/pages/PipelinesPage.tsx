@@ -61,6 +61,8 @@ interface StepDraft {
   agentId: string;
   skillId: string;
   promptTemplate: string;
+  /** Chaîne vide = politique de l'agent de l'étape. */
+  resiliencePolicyId: string;
 }
 
 let draftCounter = 0;
@@ -76,6 +78,7 @@ function PipelineEditor(props: {
   onClose: () => void;
 }) {
   const { pipeline, agents, skills, onClose } = props;
+  const policies = useStore((s) => s.policies);
   const [name, setName] = useState(pipeline?.name ?? '');
   const [description, setDescription] = useState(pipeline?.description ?? '');
   const [steps, setSteps] = useState<StepDraft[]>(() =>
@@ -86,6 +89,7 @@ function PipelineEditor(props: {
       agentId: s.agentId,
       skillId: s.skillId ?? '',
       promptTemplate: s.promptTemplate,
+      resiliencePolicyId: s.resiliencePolicyId ?? '',
     })),
   );
   const [error, setError] = useState<string | null>(null);
@@ -101,6 +105,7 @@ function PipelineEditor(props: {
         agentId: agents[0]?.id ?? '',
         skillId: '',
         promptTemplate: prev.length === 0 ? '{{input}}' : '{{prev}}',
+        resiliencePolicyId: '',
       },
     ]);
   };
@@ -160,6 +165,7 @@ function PipelineEditor(props: {
       agentId: s.agentId,
       skillId: s.skillId || null,
       promptTemplate: s.promptTemplate,
+      resiliencePolicyId: s.resiliencePolicyId || null,
     }));
     setBusy(true);
     try {
@@ -273,6 +279,23 @@ function PipelineEditor(props: {
                 </select>
               </Field>
             </div>
+            <Field
+              label="Fournisseurs de l’étape (optionnel)"
+              hint="Route cette étape vers d’autres comptes que ceux de l’agent : rédiger sur un abonnement, synthétiser sur une API bon marché."
+            >
+              <select
+                className="select"
+                value={step.resiliencePolicyId}
+                onChange={(e) => patchStep(step.key, { resiliencePolicyId: e.target.value })}
+              >
+                <option value="">Politique de l’agent</option>
+                {policies.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
             <Field label="Gabarit de prompt" hint={PROMPT_TEMPLATE_HINT}>
               <textarea
                 className="textarea"

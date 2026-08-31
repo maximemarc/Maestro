@@ -7,10 +7,12 @@ tu crées des agents spécialisés, tu leur confies des tâches — à la demand
 par cron ou depuis Telegram — et tu supervises tout en temps réel : flux de messages,
 approbations d'outils, tokens et coûts.
 
-> Prérequis d'authentification : Maestro pilote **Claude Code** via le
-> [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk). Il réutilise
+> Prérequis d'authentification : par défaut, Maestro pilote **Claude Code** via le
+> [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) et réutilise
 > l'authentification existante de la machine (abonnement Claude connecté via `claude`,
-> ou variable `ANTHROPIC_API_KEY`).
+> ou variable `ANTHROPIC_API_KEY`). Il sait aussi répartir ses runs sur **plusieurs
+> comptes** et sur **d'autres moteurs** — Codex, OpenCode, une API HTTP — avec repli
+> automatique : voir [Fournisseurs, comptes et repli](#fournisseurs-comptes-et-repli).
 
 ---
 
@@ -62,6 +64,56 @@ approbations d'outils, tokens et coûts.
   délégations comprises — deux sessions ne partagent jamais un workspace. Seule une
   délégation bloquante (`wait=true`) dépasse le plafond global, le temps que le
   parent l'attende ; une délégation asynchrone y est soumise, ce qui borne le fan-out
+
+### Fournisseurs, comptes et repli
+
+Un run n'est plus « une session Claude Code » mais **une tentative sur un compte
+d'un fournisseur**. Cette indirection est ce qui permet de tenir quand un quota
+tombe, et d'exécuter ailleurs que chez Anthropic.
+
+- **Comptes** — un compte est une identité d'exécution :
+  - _profil d'abonnement_ : un `CLAUDE_CONFIG_DIR` dédié, avec sa propre session
+    et donc **son propre quota**. C'est le mécanisme du multi-comptes Claude ;
+  - _clé d'API_ : le **nom** d'une variable d'environnement du serveur. 🔒 La
+    valeur n'entre jamais en base et n'est jamais renvoyée à l'interface ;
+  - _environnement ambiant_ : le comportement d'avant, sans repli.
+- **Fournisseurs** — `claude-sdk` (Claude Code), `codex-cli`, `opencode-cli`, et
+  `http-api` (Anthropic Messages ou tout service compatible OpenAI : OpenRouter,
+  Ollama, LM Studio).
+- **Politiques de résilience** — une liste ordonnée de comptes plus des bornes :
+  essais par compte, essais au total, backoff exponentiel avec jitter, attente
+  maximale pour un quota, seuil de résumé. Attachable à un agent, à une étape de
+  pipeline, ou à l'instance entière.
+- **Classification de l'échec** — c'est elle qui décide de la suite, parce que
+  la bonne réaction dépend entièrement de la nature de la panne : limite d'usage,
+  débit limité, fournisseur saturé, authentification invalide, contexte dépassé,
+  incident réseau, garde-fou Maestro. Chaque tentative affiche la classe retenue.
+- **Arbitrage face à un quota : avancer plutôt qu'attendre.** On bascule si un
+  compte peut prendre le relais ; on n'attend qu'à défaut, et seulement si la
+  réouverture est _annoncée_ (en-tête `retry-after`, ou horodatage joint par
+  Claude Code). Une heure écrite en prose n'est jamais interprétée : un délai
+  deviné vaut moins qu'un échec franc.
+- **Reprise ailleurs (handoff)** — au franchissement d'un seuil, tant qu'un
+  modèle est joignable, un résumé structuré du travail est rédigé et réinjecté
+  en préambule de la tentative suivante. Au blocage, un filet de sécurité
+  reconstruit ce résumé **mécaniquement** depuis le journal d'exécution : quand
+  tous les comptes sont en quota, plus personne ne peut résumer. Un résumé
+  dégradé est signalé comme tel, et versé au `MEMORY.md` de l'agent.
+- **Vue par tentative** — le détail d'un run montre qui a essayé, ce qui a
+  échoué, combien de temps on a attendu et où c'est reparti. Cet encart
+  n'apparaît qu'à partir de la deuxième tentative.
+
+> ⚠️ **Ce qu'on perd hors du SDK Claude, et qui est affiché, pas masqué.** Les
+> moteurs CLI tiers n'exposent aucun équivalent de `canUseTool` : la politique
+> d'approbation d'un agent y devient **déclarative**, Maestro ne peut plus
+> l'appliquer. Le coût n'est pas rapporté, et le transcript est plus grossier.
+> Le fournisseur `http-api`, lui, n'a aucun outil et ne modifie pas le
+> workspace — c'est un repli de rédaction, pas un moteur de codage.
+
+> ℹ️ Les commandes non interactives proposées par défaut pour Codex et OpenCode
+> sont des **propositions**, pas un contrat : leurs options changent d'une
+> version à l'autre. Elles sont éditables par compte, et le bouton « Tester »
+> les confronte à la version installée.
 
 ### Approbations (human-in-the-loop)
 
@@ -238,6 +290,10 @@ définir `VOYAGE_API_KEY` ou `OPENAI_API_KEY` dans l'environnement du serveur :
 - Étapes séquentielles multi-agents ; variables de gabarit `{{input}}`, `{{prev}}`,
   `{{steps.<nom>}}`
 - Suivi d'exécution étape par étape, sortie de chaque étape consultable
+- **Chaîne hétérogène** : chaque étape peut imposer sa propre politique de
+  résilience, et donc ses propres fournisseurs — rédiger sur un compte
+  d'abonnement, relire sur un autre outil, synthétiser sur une API bon marché,
+  sans dupliquer les agents
 
 ### Délégation inter-agents
 

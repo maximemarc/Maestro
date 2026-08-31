@@ -41,11 +41,27 @@ interface AuthStatus {
 export async function readAuthStatus(configDir: string | null): Promise<DetectedProfile | null> {
   const env = { ...process.env };
   if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+
+  let stdout: string;
   try {
-    const { stdout } = await exec('claude', ['auth', 'status'], {
-      env,
-      timeout: STATUS_TIMEOUT_MS,
-    });
+    ({ stdout } = await exec('claude', ['auth', 'status'], { env, timeout: STATUS_TIMEOUT_MS }));
+  } catch (err) {
+    /*
+     * Sortie non nulle ≠ absence de réponse.
+     *
+     * Vérifié sur la machine : un profil non connecté fait sortir
+     * `claude auth status` en code 1, tout en imprimant un JSON parfaitement
+     * valide. Ne lire que le cas nominal faisait conclure « la commande n'a pas
+     * répondu » là où la réponse était « ce profil n'est pas authentifié » —
+     * deux diagnostics qui n'appellent pas du tout la même action de la part de
+     * l'opérateur.
+     */
+    const failed = err as { stdout?: string };
+    if (typeof failed.stdout !== 'string' || failed.stdout.trim() === '') return null;
+    stdout = failed.stdout;
+  }
+
+  try {
     const status = JSON.parse(stdout) as AuthStatus;
     return {
       configDir: configDir ?? '(défaut)',

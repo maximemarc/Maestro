@@ -21,7 +21,7 @@ import {
   type SessionHandoff,
 } from '@maestro/shared';
 import { ZERO_USAGE, type AttemptOutcome, type UsageDelta } from './providers/adapter.ts';
-import { classifyFailure, FAILURE_LABELS } from './providers/failure.ts';
+import { classifyFailure, classifySilentSuccess, FAILURE_LABELS } from './providers/failure.ts';
 import { HandoffService } from './providers/handoff.ts';
 import {
   formatDuration,
@@ -1034,6 +1034,26 @@ export class RunEngine {
             durationMs: message.duration_ms,
           });
           if (message.subtype === 'success') {
+            /* Un « succès » qui n'a consommé aucun token n'a pas été produit
+               par un modèle : c'est un message d'erreur du CLI présenté comme
+               une réponse. Le prendre au mot clôturerait le run en vert sans
+               jamais tenter le compte suivant. */
+            const consumed =
+              usage.inputTokens +
+              usage.outputTokens +
+              usage.cacheReadTokens +
+              usage.cacheWriteTokens;
+            const disguised = classifySilentSuccess(message.result, consumed);
+            if (disguised) {
+              return {
+                status: 'failed',
+                sessionId: run.sessionId,
+                resultText: null,
+                error: message.result,
+                failureSignal: { hint: disguised },
+                usage,
+              };
+            }
             return {
               status: 'succeeded',
               sessionId: run.sessionId,

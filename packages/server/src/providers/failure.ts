@@ -290,6 +290,33 @@ function truncateMessage(text: string): string {
   return clean.length > MESSAGE_MAX ? `${clean.slice(0, MESSAGE_MAX)}…` : clean;
 }
 
+/**
+ * Détecte un échec déguisé en succès.
+ *
+ * Constaté en conditions réelles : lancé sur un profil non authentifié, le
+ * Claude Agent SDK ne lève pas et ne rend pas d'erreur — il rend un résultat de
+ * sous-type `success` dont le texte est « Not logged in · Please run /login »,
+ * avec zéro token consommé. Pris au mot, Maestro clôturait le run en vert, ne
+ * déclenchait aucun repli, et livrait ce message comme réponse de l'agent.
+ *
+ * Le garde-fou tient en une observation : **aucun appel de modèle n'est
+ * gratuit.** Un résultat qui n'a consommé ni entrée, ni sortie, ni cache n'a
+ * pas été produit par un modèle. Ce n'est qu'à cette condition que le texte est
+ * soumis à la classification — sinon une réponse légitime qui parlerait de
+ * « rate limit » serait requalifiée en échec.
+ *
+ * Rend la classe d'échec à retenir, ou `null` si le succès est authentique.
+ */
+export function classifySilentSuccess(
+  resultText: string,
+  totalTokens: number,
+): FailureClass | null {
+  if (totalTokens > 0) return null;
+  if (!resultText.trim()) return null;
+  const verdict = classifyFailure({ message: resultText });
+  return verdict.klass === 'fatal' ? null : verdict.klass;
+}
+
 /** Libellés français des classes, pour le transcript et l'interface. */
 export const FAILURE_LABELS: Record<FailureClass, string> = {
   quota: 'limite d’usage atteinte',
