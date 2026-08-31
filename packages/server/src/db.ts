@@ -28,6 +28,7 @@ import type {
   RunStatus,
   Settings,
   AgentStats,
+  RunStats,
   TokensByBucket,
   Beat,
   FederatedPeer,
@@ -2359,6 +2360,46 @@ export class Store {
       avgDurationMs: num(r.avgdur),
       lastRunAt: strOrNull(r.last),
     }));
+  }
+
+  /**
+   * Bilan d'exécution depuis un instant donné.
+   *
+   * La médiane est calculée ici plutôt qu'en SQL : SQLite n'a pas de fonction
+   * de médiane, et l'émuler en SQL coûterait deux sous-requêtes pour un gain
+   * nul sur les volumes en jeu.
+   */
+  runStats(sinceIso: string, restartError: string): RunStats {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n,
+           COALESCE(SUM(status = 'succeeded'), 0) AS ok,
+           COALESCE(SUM(status = 'failed' AND (error IS NULL OR error <> ?)), 0) AS ko,
+           COALESCE(SUM(status = 'cancelled'), 0) AS ann
+         FROM runs WHERE created_at >= ?`,
+      )
+      .get(restartError, sinceIso) as SqlRow;
+
+    const durations = (
+      this.db
+        .prepare(
+          `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000.0 AS ms
+           FROM runs
+           WHERE created_at >= ? AND started_at IS NOT NULL AND ended_at IS NOT NULL
+           ORDER BY ms`,
+        )
+        .all(sinceIso) as SqlRow[]
+    ).map((r) => num(r.ms));
+
+    return {
+      total: num(row.n),
+      succeeded: num(row.ok),
+      failed: num(row.ko),
+      cancelled: num(row.ann),
+      medianDurationMs: durations.length
+        ? Math.round(durations[Math.floor(durations.length / 2)] ?? 0)
+        : null,
+    };
   }
 
   tokensBy(groupBy: 'day' | 'agent' | 'model', sinceIso: string): TokensByBucket[] {
