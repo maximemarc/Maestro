@@ -14,7 +14,12 @@ import {
   shouldNotifyRunEnd,
   type MessageDeps,
 } from './messages.ts';
-import type { Channel, ChannelMessage } from './types.ts';
+import {
+  supportsInbound,
+  type Channel,
+  type ChannelMessage,
+  type InboundChannel,
+} from './types.ts';
 
 export class ChannelRegistry {
   private channels: Channel[];
@@ -41,6 +46,16 @@ export class ChannelRegistry {
   /** Vrai si au moins un canal sait résoudre une approbation. */
   get hasInteractive(): boolean {
     return this.channels.some((c) => c.interactive);
+  }
+
+  /**
+   * Canaux qui attendent des requêtes HTTP entrantes.
+   *
+   * Exposé pour que le montage des routes reste au serveur : c'est lui qui
+   * connaît Fastify, et lui seul doit décider quels chemins existent.
+   */
+  inbound(): InboundChannel[] {
+    return this.channels.filter(supportsInbound);
   }
 
   start(): void {

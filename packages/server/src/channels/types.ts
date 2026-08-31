@@ -72,6 +72,55 @@ export interface Channel {
   send(message: ChannelMessage): Promise<void>;
 }
 
+/**
+ * Requête reçue d'un canal entrant.
+ *
+ * Le corps reste en `Buffer` et non en objet déjà analysé, parce que les
+ * signatures de webhook portent sur les **octets exacts** : re-sérialiser le
+ * JSON change les espaces et invalide la vérification. C'est cette contrainte
+ * qui dicte la forme du contrat.
+ */
+export interface InboundRequest {
+  rawBody: Buffer;
+  /** En-têtes en minuscules, tels que fournis par le serveur HTTP. */
+  headers: Record<string, string | undefined>;
+}
+
+export interface InboundResponse {
+  status: number;
+  /** Une chaîne part en texte brut, un objet en JSON. Absent : corps vide. */
+  body?: unknown;
+}
+
+/**
+ * Canal qui reçoit par HTTP, au lieu d'aller chercher ses messages.
+ *
+ * 🔒 Le chemin est monté **hors** de `/api`, donc hors du jeton Maestro : le
+ * service distant ne le connaît pas et ne peut pas l'apprendre.
+ * L'authentification repose donc entièrement sur ce que `handleInbound`
+ * vérifie — signature, horodatage, liste blanche. Un canal entrant qui néglige
+ * l'un des trois ouvre l'orchestrateur à Internet.
+ */
+export interface InboundChannel extends Channel {
+  readonly inboundPath: string;
+  handleInbound(req: InboundRequest): Promise<InboundResponse>;
+}
+
+/**
+ * Vrai si le canal sait recevoir par HTTP **et** qu'il est configuré pour.
+ *
+ * Le second test compte : un canal peut être actif en émission seule (jeton
+ * présent, secret de signature absent). Monter sa route dans ce cas exposerait
+ * un point d'entrée que rien ne vérifierait.
+ */
+export function supportsInbound(channel: Channel): channel is InboundChannel {
+  return (
+    channel.interactive &&
+    typeof (channel as InboundChannel).inboundPath === 'string' &&
+    typeof (channel as InboundChannel).handleInbound === 'function'
+  );
+}
+
 /** Icône par ton, partagée par les canaux qui en affichent une. */
 export const TONE_ICONS: Record<ChannelTone, string> = {
   ok: '✅',

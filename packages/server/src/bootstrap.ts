@@ -35,6 +35,8 @@ import { RunEngine } from './runs.ts';
 import { Scheduler } from './scheduler.ts';
 import { SkillRegistry } from './skills.ts';
 import { ChannelRegistry } from './channels/registry.ts';
+import { registerInboundRoutes } from './channels/inbound.ts';
+import { SlackChannel, slackConfigFromEnv } from './channels/slack.ts';
 import { TelegramChannel } from './channels/telegram.ts';
 import { WebhookChannel, webhookConfigFromEnv } from './channels/webhook.ts';
 import { TmuxBridge } from './tmux.ts';
@@ -95,8 +97,9 @@ engine.attachFederation(federation);
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
 const telegram = new TelegramChannel(config, store, bus, engine, agents, approvals);
+const slack = new SlackChannel(slackConfigFromEnv(), store, bus, engine, agents, approvals);
 const channels = new ChannelRegistry(
-  [telegram, new WebhookChannel(webhookConfigFromEnv(), bus)],
+  [telegram, slack, new WebhookChannel(webhookConfigFromEnv(), bus)],
   bus,
   { store, agents, engine },
 );
@@ -234,6 +237,13 @@ registerRoutes(app, {
 });
 
 /*
+ * Canaux entrants (Slack…). Comme /mcp, déclarés avant le front statique dont
+ * le repli SPA capterait autrement /hooks — un webhook recevrait une page HTML
+ * en guise de réponse, et le diagnostic serait pénible.
+ */
+await registerInboundRoutes(app, channels, bus);
+
+/*
  * Passerelle MCP : les outils Maestro pour les clients tiers (Codex, OpenCode,
  * Goose…). Déclarée après les routes REST et avant le front statique, dont le
  * repli SPA capterait autrement /mcp.
@@ -265,7 +275,8 @@ if (existsSync(join(webDist, 'index.html'))) {
     if (
       req.raw.url?.startsWith('/api/') ||
       req.raw.url?.startsWith('/ws') ||
-      req.raw.url?.startsWith('/mcp')
+      req.raw.url?.startsWith('/mcp') ||
+      req.raw.url?.startsWith('/hooks/')
     ) {
       return reply.code(404).send({ error: 'Introuvable' });
     }

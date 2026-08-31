@@ -17,6 +17,7 @@ const HISTORY_LIMIT = 50;
 const RESOLVER_LABELS: Record<ApprovalResolver, string> = {
   web: 'Web',
   telegram: 'Telegram',
+  slack: 'Slack',
   policy: 'Politique',
   timeout: 'Expiration',
 };

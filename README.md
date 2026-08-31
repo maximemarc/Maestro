@@ -393,7 +393,7 @@ savoir qu'il l'a déjà créée.
   - 🔒 Le jeton d'un pair est traité comme une clé de fournisseur : la base ne
     garde que le **nom de la variable d'environnement** qui le porte.
 
-### Canaux — Telegram, webhooks
+### Canaux — Telegram, Slack, webhooks
 
 Un **canal** relie Maestro à un endroit où des humains regardent. Un message y
 circule sous forme **structurée** — titre, faits, corps, actions — et chaque
@@ -404,14 +404,44 @@ agents, lancer un run depuis un message n'a jamais rien eu de telegramien.
 - **Telegram** — bidirectionnel : notifications de fin de run, **approbations par
   boutons**, `/run <agent> <prompt>`, `/status`, `/agents`, `/approvals`.
   Whitelist stricte de chats (`TELEGRAM_CHAT_IDS`).
-- **Webhook sortant** — Slack, Discord, Mattermost, ou tout point d'entrée
-  acceptant du JSON (`MAESTRO_WEBHOOK_URL`). Sans dépendance ni bot à déclarer.
+- **Slack** — bidirectionnel : notifications en blocs, `/maestro status`,
+  `/maestro run <agent> <prompt>`, et **approbations par boutons**. Whitelist
+  stricte de salons (`SLACK_CHANNEL_IDS`). Les deux sens sont indépendants — un
+  espace de travail peut piloter Maestro sans installer de bot émetteur, les
+  réponses partant par le `response_url` de la requête.
+- **Webhook sortant** — Discord, Mattermost, ou tout point d'entrée acceptant du
+  JSON (`MAESTRO_WEBHOOK_URL`). Sans dépendance ni bot à déclarer.
 
-Les deux se complètent plus qu'ils ne se ressemblent, et la différence est
-portée par l'interface : un canal **interactif** rend les actions cliquables, un
-canal sortant seul ne le peut pas — il les mentionne alors en texte, parce
-qu'une approbation qui attend sans qu'on sache où la résoudre est pire qu'une
+Ils se complètent plus qu'ils ne se ressemblent, et la différence est portée par
+l'interface : un canal **interactif** rend les actions cliquables, un canal
+sortant seul ne le peut pas — il les mentionne alors en texte, parce qu'une
+approbation qui attend sans qu'on sache où la résoudre est pire qu'une
 notification absente.
+
+Slack a servi à éprouver l'abstraction dans la seule direction qui n'avait
+jamais été testée deux fois : la réception. Et elle a tenu — `parseCommand`,
+`runCommand` et `parseApprovalAction` sont repris tels quels, le fichier Slack ne
+contenant que du transport. Un canal sortant de plus n'aurait validé que la
+moitié du contrat.
+
+> 🔒 **La route entrante de Slack est publique, et c'est sans alternative.**
+> Telegram va chercher ses messages : rien n'est exposé. Slack pousse les siens
+> vers une URL qui doit être joignable sans le jeton Maestro — Slack ne le
+> connaît pas et ne peut pas l'apprendre. La **signature HMAC est donc la seule
+> authentification** de `POST /hooks/slack`, d'où trois règles qui ne se
+> négocient pas : sans `SLACK_SIGNING_SECRET` la route **n'existe pas** (aucun
+> mode « ouvert pour tester ») ; un horodatage de plus de cinq minutes est
+> rejeté, sinon une requête valide capturée serait rejouable indéfiniment ; la
+> comparaison est à temps constant, parce qu'un `===` sur un HMAC laisse fuir la
+> signature attendue octet par octet. Et comme pour Telegram, la whitelist
+> s'applique dans les deux sens : une signature valide prouve que Slack parle,
+> pas que la personne a le droit de lancer un run.
+
+> 🔒 **Les réponses aux commandes sont éphémères** — visibles de la seule
+> personne qui a tapé la commande. Ce n'est pas du confort : la sortie d'un run
+> peut porter du code ou des données de dossier, et la déverser dans un salon
+> serait une publication que personne n'a demandée. Les notifications, elles,
+> restent publiques : c'est leur raison d'être.
 
 > 🔒 **Envoyer vers un service tiers, c'est publier.** Le résultat d'un run peut
 > contenir du code, des extraits de dossier, des noms de clients. Le webhook

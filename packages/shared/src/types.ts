@@ -243,7 +243,16 @@ export interface TokenUsage {
 // ---------------------------------------------------------------------------
 
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired';
-export type ApprovalResolver = 'web' | 'telegram' | 'policy' | 'timeout';
+/**
+ * Qui a tranché une approbation.
+ *
+ * Un canal interactif ajoute son identifiant ici plutôt qu'un `'channel'`
+ * générique : la valeur est persistée et affichée avec un libellé exhaustif,
+ * et une chaîne libre perdrait cette exhaustivité — l'interface se mettrait à
+ * afficher des identifiants techniques. Le coût est un membre à ajouter par
+ * canal entrant, que le compilateur signale.
+ */
+export type ApprovalResolver = 'web' | 'telegram' | 'slack' | 'policy' | 'timeout';
 
 export interface Approval {
   id: string;

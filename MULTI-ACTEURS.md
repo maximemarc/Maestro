@@ -99,7 +99,7 @@ mémoire fichier, approbations. Le tableau ne compare que cette zone commune.
 | #   | Manque                                         | OpenClaw                                                                              | Maestro                                                                              | Poids                            |
 | --- | ---------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------- |
 | 1   | **Multi-fournisseurs**                         | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                                 | **fort**                         |
-| 2   | **Canaux**                                     | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal »      | **fort**                         |
+| 2   | ~~**Canaux**~~ **comblé**                      | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | abstraction « canal » + Telegram et **Slack** bidirectionnels, webhook sortant       | **fort**                         |
 | 3   | **Isolation / sandbox**                        | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                                   | **fort**                         |
 | 4   | ~~**Autonomie proactive**~~ **comblé**         | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | battement de cœur : état des lieux + `HEARTBEAT.md`, l'agent décide                  | moyen                            |
 | 5   | ~~**Installation / exploitation**~~ **comblé** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm run service -- install` (systemd user / LaunchAgent), Dockerfile + compose      | moyen, **peu coûteux à combler** |
@@ -107,8 +107,12 @@ mémoire fichier, approbations. Le tableau ne compare que cette zone commune.
 | 7   | ~~**Clients natifs**~~ **traité**              | app macOS, iOS/Android, Canvas                                                        | interface installable (manifeste, icônes, fenêtre propre) — pas d'application native | faible                           |
 | 8   | ~~**Pilotage navigateur**~~ **traité**         | intégré                                                                               | délégué à un serveur MCP tiers, déclarable dans l'interface — par conception         | faible                           |
 
-Les manques 1 et 2 sont **le même problème que la Partie 1** vu sous un autre
-angle : une architecture à un seul fournisseur et un seul canal.
+Les manques 1 et 2 étaient **le même problème que la Partie 1** vu sous un autre
+angle : une architecture à un seul fournisseur et un seul canal. Les deux sont
+désormais des architectures à N, éprouvées par un second acteur réel.
+
+Reste le manque 3, seul, et volontairement : voir la section qui lui est
+consacrée en fin de document.
 
 ### Ce que Maestro a et qu'OpenClaw n'a pas
 
@@ -578,9 +582,96 @@ résoudre une approbation, il doit dire où aller.
 canal reste `telegram`. La renommer imposerait une migration des runs déjà
 enregistrés pour la seule satisfaction du vocabulaire.
 
-**Reste ouvert** : un canal **entrant** autre que Telegram. Chaque service a sa
-propre enveloppe et sa propre vérification de signature — c'est un lot par
-service, pas une généralisation. Le contrat est prêt à les recevoir.
+**Restait ouvert** : un canal **entrant** autre que Telegram — voir la section
+suivante, qui l'a livré avec Slack.
+
+## Partie 2, manque n°2 — Slack entrant, livré le 31/08/2026
+
+L'abstraction canal avait laissé un trou précis : elle n'avait jamais été
+éprouvée **en réception**. Le webhook sortant validait la moitié sortante du
+contrat, Telegram était l'implémentation d'origine — donc l'interface de
+réception était une hypothèse, pas un fait.
+
+Slack la confronte à un transport opposé sur le seul axe qui compte. Telegram
+**va chercher** ses messages en long-polling : rien n'est exposé, il n'y a ni
+route, ni signature, ni corps brut à préserver. Slack **pousse** les siens vers
+une URL. Tout ce que ce renversement implique devait apparaître dans le contrat
+ou nulle part.
+
+**Et l'abstraction a tenu.** `parseCommand`, `runCommand` et
+`parseApprovalAction` sont repris **tels quels** : `channels/slack.ts` ne
+contient que du transport — signature, enveloppes, blocs. C'était la promesse de
+l'abstraction, et c'est vérifiable ligne par ligne.
+
+**Ce que le contrat a dû gagner**, et pourquoi :
+
+| Ajout                    | Raison                                                                                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `InboundRequest.rawBody` | une signature porte sur les **octets exacts** ; re-sérialiser le JSON change les espaces et invalide toute vérification                      |
+| `InboundChannel`         | un canal entrant déclare son chemin HTTP ; le montage reste au serveur, seul à connaître Fastify                                             |
+| `supportsInbound()`      | ne monte que les canaux **configurés** pour recevoir : un canal en émission seule exposerait une route que rien ne vérifie                   |
+| `channels/inbound.ts`    | plugin Fastify encapsulé remplaçant l'analyseur de contenu par « donne-moi les octets », **sans** toucher au reste de l'API qui veut du JSON |
+
+### 🔒 La route entrante est publique, et c'est sans alternative
+
+Slack ne connaît pas le jeton Maestro et ne peut pas l'apprendre. `/hooks/slack`
+est donc hors du hook d'authentification, qui ne garde que `/api`, `/ws` et
+`/mcp`. **La signature HMAC est la seule authentification**, il n'y a rien
+derrière — d'où quatre règles non négociables, chacune couverte par un test :
+
+1. **Sans secret de signature, la route n'existe pas.** Pas de mode « ouvert
+   pour tester » : c'est exactement le réglage qu'on oublie de retirer.
+2. **Horodatage borné à cinq minutes.** Une signature reste valable
+   éternellement ; sans cette fenêtre, une requête valide capturée serait
+   rejouable indéfiniment.
+3. **Comparaison à temps constant.** Un `===` sur un HMAC laisse fuir la
+   signature attendue octet par octet.
+4. **Whitelist de salons, dans les deux sens.** Une signature valide prouve que
+   Slack parle, pas que la personne a le droit de lancer un run. Sans cette
+   liste, tout l'espace de travail piloterait l'orchestrateur.
+
+**Vérifié en réel**, instance vivante et requêtes signées à la main : sans
+signature → 401 ; signature d'un autre secret → 401 ; requête rejouée à
+−10 minutes → 401 ; corps altéré après signature → 401 ; salon hors whitelist →
+refus explicite sans que l'approbation soit touchée ; `/maestro status` →
+réponse en blocs avec les vrais compteurs ; défi `url_verification` → relevé ;
+`GET /hooks/slack` → 404 JSON et non la page du SPA ; `/api/overview` sans jeton
+→ 401, l'API n'a rien perdu. Et, sur une seconde instance sans
+`SLACK_SIGNING_SECRET` : canal actif en émission, **route absente**.
+
+### Deux choix de sécurité au-delà de la signature
+
+- 🔒 **Les réponses aux commandes sont éphémères.** La sortie d'un run peut
+  porter du code ou des données de dossier ; la déverser dans un salon serait une
+  publication que personne n'a demandée. Seule la personne qui a tapé la commande
+  la voit. Les notifications, elles, restent publiques — c'est leur raison d'être.
+- 🔒 **Les mentions présentes dans le contenu sont neutralisées.** Un `<@U123>`
+  dans une sortie de run ne doit pas se transformer en notification à un collègue
+  au passage.
+
+### Ce qui a été élargi plutôt que généralisé
+
+`ApprovalResolver` codait `'telegram'` en dur — un reste d'avant l'abstraction.
+J'ai ajouté `'slack'` au lieu de passer à un identifiant de canal libre : la
+valeur est **persistée et affichée** avec un libellé exhaustif, qu'une chaîne
+libre perdrait (l'interface se mettrait à montrer des identifiants techniques),
+et le changement imposerait une migration pour aucun gain visible. Le coût est un
+membre par canal entrant — que le compilateur signale, comme il l'a fait ici.
+
+### Limites assumées
+
+- **Pas d'API Events.** Seules les commandes slash et l'interactivité sont
+  traitées ; un `event_callback` est acquitté puis ignoré. Écouter les messages
+  d'un salon voudrait dire décider quoi faire d'une conversation humaine — un
+  autre sujet, avec ses propres questions de confidentialité.
+- **Cinq réponses par commande.** `response_url` n'accepte pas plus, et une est
+  prise par la réponse HTTP. Au-delà, le reste est **annoncé** (« … et N
+  autre(s) ») plutôt que perdu en silence : une approbation invisible est pire
+  qu'une liste tronquée qui le dit.
+- **Non testé contre le vrai Slack.** La signature, les enveloppes et les blocs
+  sont conformes à la documentation et vérifiés contre des requêtes signées
+  localement, mais aucune application Slack réelle n'a été déclarée — cela
+  demande un espace de travail.
 
 ## A2 — outils de contrôle pour les clients tiers, livré le 31/08/2026
 
@@ -686,3 +777,24 @@ cette machine. Ce qui est vérifié, en revanche, c'est que Maestro n'invente ri
 — il ne peut passer qu'une option lue dans l'aide du binaire présent. L'adaptateur
 lui-même est testé de bout en bout sur des binaires réels : commande, arguments,
 découpage de la sortie, code de retour, stderr, délai maximal et interruption.
+
+## Partie 2, manque n°3 — isolation, laissé ouvert délibérément
+
+C'est le dernier manque, et le seul de poids **fort** encore ouvert. Il n'a pas
+été traité ici, pour une raison qui n'est pas une question de temps.
+
+Du travail existe déjà sur la branche `feature/entrainement-mlops`, non
+fusionnée : confinement par bubblewrap, relais de socket par socat, mode dégradé
+quand le confinement est indisponible. Le réécrire dans cette branche produirait
+**deux implémentations divergentes d'un mécanisme de sécurité**, puis un conflit
+de fusion sur exactement le code où un conflit mal résolu ouvre un trou. Le pire
+endroit pour dupliquer est celui où une différence passe inaperçue.
+
+**Marche à suivre recommandée** : fusionner `feature/entrainement-mlops`, puis
+reprendre l'isolation à partir de ce qui y existe — la compléter, l'éprouver et
+la documenter, plutôt que la refaire.
+
+Ce choix est une recommandation, pas une décision : si l'existant s'avère
+inadapté après relecture, repartir de zéro dans une branche dédiée reste
+défendable. Ce qui ne l'est pas, c'est de coder la même chose deux fois en
+parallèle.
