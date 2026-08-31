@@ -51,6 +51,10 @@ const accountSchema = z.object({
   env: envSchema.default({}),
   priority: z.number().int().min(0).max(10_000).default(100),
   dailyCostLimitUsd: z.number().min(0).max(100_000).nullable().default(null),
+  /* Une fenêtre de moins d'une minute n'aurait aucun sens ; au-delà d'une
+     semaine, la mesure coûterait plus que ce qu'elle apprend. */
+  usageWindowSec: z.number().int().min(60).max(604_800).default(18_000),
+  windowTokenLimit: z.number().int().min(0).nullable().default(null),
 });
 
 const targetSchema = z.object({
@@ -71,6 +75,7 @@ const policySchema = z.object({
   quotaWaitMaxSec: z.number().int().min(0).max(86_400).default(900),
   switchOnError: z.boolean().default(true),
   handoffThresholdPct: z.number().int().min(0).max(100).default(80),
+  quotaPressurePct: z.number().int().min(0).max(100).default(85),
 });
 
 const onboardingSchema = z.object({
@@ -181,6 +186,22 @@ export function registerProviderRoutes(app: FastifyInstance, s: ProviderRouteSer
 
   /** Comptes déduits de la machine, à confirmer par l'opérateur. */
   app.get('/api/providers/suggestions', async () => s.providers.suggestAccounts());
+
+  /**
+   * Consommation des comptes sur leur fenêtre glissante.
+   *
+   * Route de lecture séparée du compte lui-même : la mesure parcourt des
+   * fichiers, et la faire à chaque `GET /accounts` ralentirait une page qui
+   * n'en a pas toujours besoin.
+   */
+  app.get('/api/providers/usage', async () => s.providers.usageAll());
+
+  app.get('/api/providers/accounts/:id/usage', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const usage = s.providers.usageFor(id);
+    if (!usage) return reply.code(404).send({ error: 'Compte introuvable' });
+    return usage;
+  });
 
   // -- Politiques ------------------------------------------------------------
 

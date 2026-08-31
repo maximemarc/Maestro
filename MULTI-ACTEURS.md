@@ -306,6 +306,53 @@ commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
 part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
 pour une absence de réponse.
 
+## Anticipation des quotas — livrée le 31/08/2026
+
+Le repli fonctionnait, mais toujours _après_ le mur : un run entamé, un contexte
+perdu, un résumé à reconstruire. Il manquait de savoir que la limite approche.
+
+**Ce qui n'existe pas, vérifié avant d'écrire du code.** Il n'y a pas de
+`/usage` programmatique : ni sous-commande, ni endpoint. `stats-cache.json`
+contient bien des totaux par jour et par modèle, mais c'est un cache recalculé
+de loin en loin — celui de la machine de développement datait de vingt jours. Il
+fallait donc reconstruire la mesure.
+
+**Ce qui existe** : les transcripts portent, pour chaque message d'assistant,
+son horodatage, son modèle et son `usage`. Écrits en direct, rangés dans le
+répertoire de configuration — donc **un jeu par profil, donc par compte** — et
+surtout ils couvrent tout ce qui a tourné sur ce profil, y compris les sessions
+lancées à la main hors de Maestro. C'est le seul point de vue complet.
+🔒 Lecture bornée aux mêmes champs que le radar : horodatage, modèle, session,
+compteurs. Jamais le contenu d'un message.
+
+**Trois décisions qui font la différence entre une jauge utile et une jauge
+trompeuse :**
+
+- **Le cache de lecture est exclu du total.** Facturé une fraction du prix, il
+  gonflerait la mesure d'un facteur dix sur une session qui relit un gros
+  contexte. Mesuré sur la machine : 12,5 M de tokens facturables pour 438 M de
+  cache lu sur la même fenêtre — un facteur 35. L'inclure aurait fait délaisser
+  un compte parfaitement disponible.
+- **Le plafond s'apprend au mur.** Aucun fournisseur ne publie celui d'un
+  abonnement. Maestro retient la consommation constatée à l'instant du refus.
+  Une valeur déclarée par l'opérateur l'emporte : qui connaît son contrat en
+  sait plus qu'une observation.
+- **Une estimation ne refuse jamais un compte.** Elle le fait passer en second
+  s'il existe une alternative plus calme, et rien de plus. Quand tous les
+  comptes sont chargés, l'ordre déclaré reprend la main. Refuser sur la foi d'un
+  chiffre deviné priverait l'opérateur d'une ressource peut-être intacte.
+
+**Trouvé en faisant tourner l'instance** : modifier un plafond restait sans
+effet pendant une minute — la mesure est mise en cache, et rien ne l'invalidait.
+L'opérateur changeait un réglage sans le voir agir, et le routage continuait de
+décider sur l'ancienne valeur.
+
+**Vérification de bout en bout** : plafond déclaré sous la consommation réelle
+(126 % de pression), politique « compte chargé → compte calme », run lancé. Le
+run a démarré directement sur le second compte — **aucune tentative échouée,
+aucun résumé de reprise, aucune erreur**. C'est la différence entre subir la
+limite et l'anticiper.
+
 **Reste non vérifié** : le comportement des vrais Codex et OpenCode, absents de
 cette machine. Ce qui est vérifié, en revanche, c'est que Maestro n'invente rien
 — il ne peut passer qu'une option lue dans l'aide du binaire présent. L'adaptateur

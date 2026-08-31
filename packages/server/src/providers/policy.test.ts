@@ -37,6 +37,10 @@ function account(overrides: Partial<ProviderAccount> = {}): ProviderAccount {
     env: {},
     priority: 10,
     dailyCostLimitUsd: null,
+    usageWindowSec: 18000,
+    windowTokenLimit: null,
+    learnedTokenLimit: null,
+    learnedAt: null,
     health: 'ready',
     cooldownUntil: null,
     lastError: null,
@@ -71,6 +75,7 @@ function policy(overrides: Partial<ResiliencePolicy> = {}): ResiliencePolicy {
     quotaWaitMaxSec: 900,
     switchOnError: true,
     handoffThresholdPct: 80,
+    quotaPressurePct: 85,
     createdAt: '',
     updatedAt: '',
     ...overrides,
@@ -168,6 +173,66 @@ describe('première tentative', () => {
   it('renonce quand la politique n’a aucune cible', () => {
     const plan = planFirstAttempt({ policy: policy(), targets: [], nowMs: NOW });
     expect(plan.action).toBe('give_up');
+  });
+});
+
+describe('anticipation de quota', () => {
+  it('préfère un compte calme à un compte proche de sa limite', () => {
+    // Le but de tout le mécanisme : changer de compte avant le mur, pas après.
+    const plan = planFirstAttempt({
+      policy: policy(),
+      targets: targets(account({ id: 'a' }), account({ id: 'b' })),
+      nowMs: NOW,
+      underPressure: new Set(['a']),
+    });
+    expect(plan.target?.account.id).toBe('b');
+    expect(plan.reason).toContain('approche de sa limite');
+  });
+
+  it('utilise quand même un compte sous pression s’il est le seul disponible', () => {
+    /* Le plafond est le plus souvent une estimation : refuser sur cette base
+       priverait l'opérateur d'une ressource peut-être encore utilisable. */
+    const plan = planFirstAttempt({
+      policy: policy(),
+      targets: targets(account({ id: 'a' })),
+      nowMs: NOW,
+      underPressure: new Set(['a']),
+    });
+    expect(plan.action).toBe('retry_same');
+    expect(plan.target?.account.id).toBe('a');
+    expect(plan.reason).toContain('seul disponible');
+  });
+
+  it('respecte l’ordre déclaré quand tous les comptes sont sous pression', () => {
+    const plan = planFirstAttempt({
+      policy: policy(),
+      targets: targets(account({ id: 'a' }), account({ id: 'b' })),
+      nowMs: NOW,
+      underPressure: new Set(['a', 'b']),
+    });
+    expect(plan.target?.account.id).toBe('a');
+  });
+
+  it('ne change rien quand aucun compte n’est sous pression', () => {
+    const plan = planFirstAttempt({
+      policy: policy(),
+      targets: targets(account({ id: 'a' }), account({ id: 'b' })),
+      nowMs: NOW,
+      underPressure: new Set(),
+    });
+    expect(plan.target?.account.id).toBe('a');
+    expect(plan.reason).not.toContain('approche');
+  });
+
+  it('ne préfère pas un compte calme mais indisponible', () => {
+    // La pression n'a jamais préséance sur la disponibilité réelle.
+    const plan = planFirstAttempt({
+      policy: policy(),
+      targets: targets(account({ id: 'a' }), account({ id: 'b', health: 'unauthenticated' })),
+      nowMs: NOW,
+      underPressure: new Set(['a']),
+    });
+    expect(plan.target?.account.id).toBe('a');
   });
 });
 

@@ -13,6 +13,7 @@ import {
   PROVIDER_CAPABILITIES,
   PROVIDER_KINDS,
   PROVIDER_LABELS,
+  type AccountUsage,
   type AgentConfig,
   type FailureVerdict,
   type ProviderAccount,
@@ -32,6 +33,7 @@ import { createProfileDir, loginCommand, probeClaude, readAuthStatus } from './c
 import { HttpApiAdapter } from './http-api.ts';
 import { FAILURE_LABELS } from './failure.ts';
 import { availability, type ResolvedTarget } from './policy.ts';
+import { DEFAULT_WINDOW_SEC, UsageTracker } from './usage.ts';
 
 /**
  * Pénitence appliquée quand un quota tombe sans réouverture annoncée.
@@ -52,11 +54,48 @@ export class ProviderService {
     ['http-api', new HttpApiAdapter()],
   ]);
 
+  /**
+   * Mesure de consommation, alimentée par les tentatives pour les comptes qui
+   * n'ont pas de transcript.
+   */
+  readonly usage = new UsageTracker((accountId, sinceIso) =>
+    this.store.accountUsageSince(accountId, sinceIso),
+  );
+
   constructor(
     private store: Store,
     private bus: Bus,
     private config: MaestroConfig,
   ) {}
+
+  /** Consommation d'un compte sur sa fenêtre glissante. */
+  usageFor(accountId: string, nowMs = Date.now()): AccountUsage | null {
+    const account = this.store.getProviderAccount(accountId);
+    return account ? this.usage.usageFor(account, nowMs) : null;
+  }
+
+  /** Consommation de tous les comptes — vue d'ensemble de la page Fournisseurs. */
+  usageAll(nowMs = Date.now()): AccountUsage[] {
+    return this.store.listProviderAccounts().map((a) => this.usage.usageFor(a, nowMs));
+  }
+
+  /**
+   * Comptes dont la fenêtre est trop chargée pour qu'on les préfère.
+   *
+   * Rendu sous forme d'ensemble plutôt que d'un filtre : le routeur doit
+   * pouvoir *préférer* un compte calme sans s'interdire un compte chargé quand
+   * il n'y a rien d'autre. Un plafond estimé ne justifie jamais un refus.
+   */
+  underPressure(policy: ResiliencePolicy, nowMs = Date.now()): Set<string> {
+    const out = new Set<string>();
+    if (policy.quotaPressurePct <= 0) return out;
+    const threshold = policy.quotaPressurePct / 100;
+    for (const account of this.store.listProviderAccounts()) {
+      const usage = this.usage.usageFor(account, nowMs);
+      if (usage.pressure !== null && usage.pressure >= threshold) out.add(account.id);
+    }
+    return out;
+  }
 
   /**
    * Adaptateur d'un fournisseur externe.
@@ -90,6 +129,8 @@ export class ProviderService {
       lastError: null,
       lastCheckedAt: null,
       detail: null,
+      learnedTokenLimit: null,
+      learnedAt: null,
       createdAt: now,
       updatedAt: now,
     };
@@ -113,6 +154,10 @@ export class ProviderService {
     }
     if (patch.enabled === false) updated.health = 'disabled';
     this.store.updateProviderAccount(updated);
+    /* La mesure est mise en cache une minute. Sans cet oubli, changer le
+       plafond ou la fenêtre resterait sans effet visible le temps du cache — et
+       pire, le routage continuerait de décider sur l'ancienne valeur. */
+    this.usage.forget(id);
     this.bus.publish({ type: 'provider.updated', payload: updated });
     return updated;
   }
@@ -122,6 +167,7 @@ export class ProviderService {
     if (!account) return false;
     const detached = this.store.detachAccountFromPolicies(id);
     this.store.deleteProviderAccount(id);
+    this.usage.forget(id);
     this.bus.publish({ type: 'provider.deleted', payload: { id } });
     this.bus.log(
       'warn',
@@ -180,6 +226,30 @@ export class ProviderService {
     if (!account) return;
     if (!verdict.poisonsAccount) return;
 
+    /*
+     * Le mur est le seul endroit où l'on apprend où il est.
+     *
+     * Aucun fournisseur ne publie le plafond d'un abonnement. La consommation
+     * mesurée à l'instant du refus en est la meilleure approximation
+     * disponible : on la retient pour anticiper la fois suivante. C'est une
+     * estimation, et le reste — elle n'est jamais utilisée pour refuser un
+     * compte, seulement pour lui préférer un autre à égalité.
+     */
+    let learnedTokenLimit = account.learnedTokenLimit;
+    let learnedAt = account.learnedAt;
+    if (verdict.klass === 'quota') {
+      const usage = this.usage.usageFor(account, nowMs);
+      if (usage.source !== 'unavailable' && usage.billableTokens > 0) {
+        learnedTokenLimit = usage.billableTokens;
+        learnedAt = new Date(nowMs).toISOString();
+        this.bus.log(
+          'info',
+          'providers',
+          `Plafond estimé pour « ${account.name} » : ${usage.billableTokens} tokens sur ${Math.round(usage.windowSec / 3600)} h`,
+        );
+      }
+    }
+
     let health: ProviderAccount['health'] = account.health;
     let cooldownUntil: string | null = null;
 
@@ -203,11 +273,15 @@ export class ProviderService {
       ...account,
       health,
       cooldownUntil,
+      learnedTokenLimit,
+      learnedAt,
       lastError: `${FAILURE_LABELS[verdict.klass]} — ${verdict.message}`,
       lastCheckedAt: nowIso(),
       updatedAt: nowIso(),
     };
     this.store.updateProviderAccount(updated);
+    // Le plafond vient peut-être de changer : la mesure suivante doit en tenir compte.
+    this.usage.forget(account.id);
     this.bus.publish({ type: 'provider.updated', payload: updated });
     this.bus.log(
       'warn',
@@ -560,5 +634,7 @@ export function emptyAccount(kind: ProviderKind): ProviderAccountCreate {
     env: {},
     priority: 100,
     dailyCostLimitUsd: null,
+    usageWindowSec: DEFAULT_WINDOW_SEC,
+    windowTokenLimit: null,
   };
 }

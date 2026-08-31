@@ -435,7 +435,12 @@ export class RunEngine {
     let lastVerdict: FailureVerdict | null = null;
 
     let plan: AttemptPlan = routed
-      ? planFirstAttempt({ policy: policy!, targets: resolved, nowMs: Date.now() })
+      ? planFirstAttempt({
+          policy: policy!,
+          targets: resolved,
+          nowMs: Date.now(),
+          underPressure: this.providers.underPressure(policy!),
+        })
       : {
           action: 'retry_same',
           target: null,
@@ -522,6 +527,11 @@ export class RunEngine {
         this.emitEvent(run, 'info', {
           text: `Tentative ${attemptIndex} — ${plan.reason}`,
         });
+      } else if (plan.target && plan.target.index > 0) {
+        /* Premier essai ailleurs que sur le compte de tête : c'est le cas
+           surprenant. Le taire laisserait l'opérateur devant un run exécuté par
+           un compte qu'il n'avait pas mis en premier, sans explication. */
+        this.emitEvent(run, 'info', { text: `Démarrage sur le ${plan.reason}` });
       }
 
       this.warnIfPermissionsUnenforced(run, agent, kind);
@@ -536,7 +546,7 @@ export class RunEngine {
         env,
         onProgress: (tokens) => {
           if (thresholdCaptured || !policy || policy.handoffThresholdPct <= 0) return;
-          if (!this.overHandoffThreshold(agent, policy, tokens)) return;
+          if (!this.overHandoffThreshold(agent, policy, tokens, account?.id ?? null)) return;
           thresholdCaptured = true;
           /* Capture anticipée, volontairement non attendue : bloquer le flux
              du transcript pour rédiger un résumé rendrait l'interface muette
@@ -732,9 +742,27 @@ export class RunEngine {
     agent: AgentConfig,
     policy: ResiliencePolicy,
     tokens: number,
+    accountId: string | null,
   ): boolean {
-    if (!agent.tokenBudget || agent.tokenBudget <= 0) return false;
-    return (tokens / agent.tokenBudget) * 100 >= policy.handoffThresholdPct;
+    if (
+      agent.tokenBudget &&
+      agent.tokenBudget > 0 &&
+      (tokens / agent.tokenBudget) * 100 >= policy.handoffThresholdPct
+    ) {
+      return true;
+    }
+    /*
+     * Seconde jauge : la fenêtre du compte lui-même.
+     *
+     * C'est celle qui compte vraiment, et la seule qui existe quand l'agent n'a
+     * pas de budget déclaré — le cas courant. Elle permet de capturer le résumé
+     * pendant qu'un modèle répond encore, au lieu d'attendre le refus et de
+     * devoir se rabattre sur une reconstruction mécanique.
+     */
+    if (!accountId) return false;
+    const usage = this.providers.usageFor(accountId);
+    if (!usage || usage.pressure === null) return false;
+    return usage.pressure * 100 >= policy.handoffThresholdPct;
   }
 
   /**

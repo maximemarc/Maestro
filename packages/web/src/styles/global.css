@@ -777,6 +777,33 @@
     border-color: transparent;
   }
 
+  /* Jauge de remplissage — consommation d'un compte sur sa fenêtre.
+     Le ton suit le même code que les badges : neutre, puis avertissement quand
+     la bascule anticipée est proche. */
+  .meter {
+    height: 5px;
+    border-radius: 3px;
+    background: var(--surface-2, rgba(255, 255, 255, 0.07));
+    overflow: hidden;
+  }
+  .meter-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+  .meter-fill.ok {
+    background: var(--ok);
+  }
+  .meter-fill.warn {
+    background: var(--warn);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .meter-fill {
+      transition: none;
+    }
+  }
+
   /* Pastille de statut : elle porte un état machine réel, jamais un ornement.
      L'animation ne survit pas à prefers-reduced-motion. */
   .status-dot {

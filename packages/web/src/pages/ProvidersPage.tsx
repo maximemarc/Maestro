@@ -29,6 +29,7 @@ import {
   PROVIDER_CAPABILITIES,
   PROVIDER_KINDS,
   PROVIDER_LABELS,
+  type AccountUsage,
   type ProviderAccount,
   type ProviderAccountCreate,
   type ProviderHealth,
@@ -80,6 +81,9 @@ function blankAccount(kind: ProviderKind): ProviderAccountCreate {
     env: {},
     priority: 100,
     dailyCostLimitUsd: null,
+    // Cinq heures : la fenêtre de session des abonnements Claude.
+    usageWindowSec: 5 * 60 * 60,
+    windowTokenLimit: null,
   };
 }
 
@@ -91,11 +95,25 @@ function toForm(account: ProviderAccount): ProviderAccountCreate {
     lastError: _e,
     lastCheckedAt: _l,
     detail: _d,
+    learnedTokenLimit: _lt,
+    learnedAt: _la,
     createdAt: _cr,
     updatedAt: _u,
     ...rest
   } = account;
   return rest;
+}
+
+/** Tokens en notation courte : 1 240 000 se lit mal dans une jauge. */
+function fmtTokensShort(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)} M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)} k`;
+  return String(value);
+}
+
+function fmtWindow(sec: number): string {
+  const hours = sec / 3600;
+  return hours >= 1 ? `${Math.round(hours)} h` : `${Math.round(sec / 60)} min`;
 }
 
 function blankPolicy(): ResiliencePolicyCreate {
@@ -112,6 +130,7 @@ function blankPolicy(): ResiliencePolicyCreate {
     quotaWaitMaxSec: 900,
     switchOnError: true,
     handoffThresholdPct: 80,
+    quotaPressurePct: 85,
   };
 }
 
@@ -121,6 +140,7 @@ export default function ProvidersPage() {
   const notify = useStore((s) => s.notify);
 
   const [probes, setProbes] = useState<ProviderProbe[] | null>(null);
+  const [usage, setUsage] = useState<AccountUsage[]>([]);
   const [probing, setProbing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [accountForm, setAccountForm] = useState<{
@@ -148,6 +168,29 @@ export default function ProvidersPage() {
   useEffect(() => {
     void probe();
   }, [probe]);
+
+  /*
+   * La consommation est relue périodiquement : elle bouge pendant qu'un run
+   * tourne, et une jauge figée sur l'état d'ouverture de la page induirait en
+   * erreur au moment où elle compte le plus.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      api
+        .providersUsage()
+        .then((list) => {
+          if (!cancelled) setUsage(list);
+        })
+        .catch(() => undefined);
+    };
+    load();
+    const timer = window.setInterval(load, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [accounts.length]);
 
   const saveAccount = async () => {
     if (!accountForm) return;
@@ -276,6 +319,7 @@ export default function ProvidersPage() {
               <AccountCard
                 key={account.id}
                 account={account}
+                usage={usage.find((u) => u.accountId === account.id)}
                 testing={testing === account.id}
                 onTest={() => void test(account.id)}
                 onEdit={() => setAccountForm({ id: account.id, draft: toForm(account) })}
@@ -503,8 +547,71 @@ function SuggestionList({
   );
 }
 
+/**
+ * Consommation d'un compte sur sa fenêtre.
+ *
+ * Trois cas à distinguer nettement, parce qu'ils appellent des réactions
+ * différentes : on mesure et on connaît le plafond (jauge), on mesure sans
+ * connaître le plafond (chiffre brut, aucune conclusion), on ne sait pas
+ * mesurer (le dire). Afficher une jauge vide dans le dernier cas ferait passer
+ * un angle mort pour un compte au repos.
+ */
+function UsageGauge({ usage }: { usage: AccountUsage | undefined }) {
+  if (!usage) return null;
+
+  if (usage.source === 'unavailable') {
+    return (
+      <p className="hint mt-2">
+        Consommation non mesurable sur ce moteur : il ne rapporte pas ses tokens. L’anticipation de
+        quota ne s’applique pas.
+      </p>
+    );
+  }
+
+  const window = fmtWindow(usage.windowSec);
+  const consumed = `${fmtTokensShort(usage.billableTokens)} tokens sur ${window}`;
+  const origin =
+    usage.source === 'transcripts'
+      ? 'transcripts du profil, sessions hors Maestro comprises'
+      : 'tentatives lancées par Maestro';
+
+  if (usage.pressure === null) {
+    return (
+      <p className="hint mt-2">
+        {consumed} — {origin}. Aucun plafond connu : Maestro l’apprendra à la première limite
+        atteinte, ou déclare-le sur le compte.
+      </p>
+    );
+  }
+
+  const pct = Math.min(100, Math.round(usage.pressure * 100));
+  const tone = pct >= 85 ? 'warn' : pct >= 60 ? '' : 'ok';
+  return (
+    <div className="mt-2">
+      <div className="row gap-2 items-center">
+        <span className={`badge ${tone}`}>{pct} %</span>
+        <span className="hint">
+          {consumed} sur {fmtTokensShort(usage.limitTokens ?? 0)}
+          {usage.limitLearned ? ' (plafond estimé d’après la dernière limite atteinte)' : ''}
+        </span>
+      </div>
+      <div
+        className="meter mt-1"
+        role="meter"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label="Consommation de la fenêtre"
+      >
+        <div className={`meter-fill ${tone}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 function AccountCard(props: {
   account: ProviderAccount;
+  usage: AccountUsage | undefined;
   testing: boolean;
   onTest: () => void;
   onEdit: () => void;
@@ -549,6 +656,7 @@ function AccountCard(props: {
         {account.model ? ` — modèle imposé ${account.model}` : ''}
         {account.dailyCostLimitUsd ? ` — plafond $${account.dailyCostLimitUsd}/jour` : ''}
       </p>
+      <UsageGauge usage={props.usage} />
       {account.detail && <p className="hint">{account.detail}</p>}
       {account.lastError && <p className="hint warn">{account.lastError}</p>}
       {!caps.interceptsPermissions && (
@@ -812,6 +920,39 @@ function AccountModal(props: {
           </Field>
         </div>
 
+        <div className="row gap-3">
+          <Field
+            label="Fenêtre de mesure (h)"
+            hint="Sur quelle durée glissante la consommation est comptée. 5 h correspond à la session des abonnements Claude."
+          >
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={168}
+              value={Math.round(draft.usageWindowSec / 3600)}
+              onChange={(e) => set({ usageWindowSec: Math.max(1, Number(e.target.value)) * 3600 })}
+            />
+          </Field>
+          <Field
+            label="Plafond de la fenêtre (tokens)"
+            hint="Vide : Maestro l’apprend en observant la consommation atteinte au moment où ce compte heurte sa limite. Renseigne-le si tu connais ton contrat — une valeur déclarée l’emporte sur une estimation."
+          >
+            <input
+              className="input"
+              type="number"
+              min={0}
+              placeholder={
+                probe && draft.kind === 'claude-sdk' ? 'appris à la première limite' : 'aucun'
+              }
+              value={draft.windowTokenLimit ?? ''}
+              onChange={(e) =>
+                set({ windowTokenLimit: e.target.value === '' ? null : Number(e.target.value) })
+              }
+            />
+          </Field>
+        </div>
+
         <label className="row gap-2 items-center">
           <input
             type="checkbox"
@@ -1014,7 +1155,7 @@ function PolicyModal(props: {
           </Field>
           <Field
             label="Seuil de résumé (%)"
-            hint="Du budget de tokens de l’agent. 0 désactive la capture anticipée ; le filet de sécurité reste actif."
+            hint="Du budget de tokens de l’agent, ou de la fenêtre du compte. 0 désactive la capture anticipée ; le filet de sécurité reste actif."
           >
             <input
               className="input"
@@ -1023,6 +1164,19 @@ function PolicyModal(props: {
               max={100}
               value={draft.handoffThresholdPct}
               onChange={(e) => set({ handoffThresholdPct: Number(e.target.value) })}
+            />
+          </Field>
+          <Field
+            label="Anticipation de quota (%)"
+            hint="Au-delà de ce niveau de remplissage, un compte est laissé de côté s’il en existe un plus calme. Il n’est jamais refusé : quand tous sont chargés, l’ordre déclaré reprend la main. 0 désactive."
+          >
+            <input
+              className="input"
+              type="number"
+              min={0}
+              max={100}
+              value={draft.quotaPressurePct}
+              onChange={(e) => set({ quotaPressurePct: Number(e.target.value) })}
             />
           </Field>
         </div>

@@ -93,12 +93,36 @@ tombe, et d'exécuter ailleurs que chez Anthropic.
   réouverture est _annoncée_ (en-tête `retry-after`, ou horodatage joint par
   Claude Code). Une heure écrite en prose n'est jamais interprétée : un délai
   deviné vaut moins qu'un échec franc.
+- **Anticipation des quotas** — plutôt que d'attendre le refus, Maestro mesure
+  la consommation de chaque compte sur une fenêtre glissante (5 h par défaut,
+  réglable) et **préfère un compte plus calme** quand celui de tête approche de
+  sa limite. La bascule se fait alors _avant_ le mur : aucun run entamé, aucun
+  contexte perdu, aucun résumé à reconstruire.
+  - _D'où vient la mesure_ : pour un compte Claude, des **transcripts** du
+    profil — la seule source qui voie aussi les sessions lancées à la main hors
+    de Maestro, qui consomment pourtant le même quota. Pour une API HTTP, des
+    tentatives enregistrées. Un moteur CLI tiers ne rapporte pas ses tokens :
+    l'interface le dit au lieu d'afficher une jauge à zéro.
+  - _D'où vient le plafond_ : de ce que tu déclares, sinon de ce que Maestro
+    **apprend** — la consommation constatée au moment où ce compte a heurté sa
+    limite. Aucun fournisseur ne publie ce chiffre pour un abonnement ; plutôt
+    que d'en inventer un, Maestro retient celui qu'il a vu.
+  - _Ce qu'un plafond estimé ne fait jamais_ : refuser un compte. Il ne fait que
+    le mettre de côté s'il existe une alternative. Quand tous les comptes sont
+    chargés, l'ordre que tu as déclaré reprend la main.
+  - Le cache de lecture est exclu du total : facturé une fraction du prix, il
+    ferait paraître saturé un compte qui ne fait que relire un gros contexte.
+    Mesuré en conditions réelles, l'écart est d'un facteur 35.
+
 - **Reprise ailleurs (handoff)** — au franchissement d'un seuil, tant qu'un
   modèle est joignable, un résumé structuré du travail est rédigé et réinjecté
   en préambule de la tentative suivante. Au blocage, un filet de sécurité
   reconstruit ce résumé **mécaniquement** depuis le journal d'exécution : quand
   tous les comptes sont en quota, plus personne ne peut résumer. Un résumé
-  dégradé est signalé comme tel, et versé au `MEMORY.md` de l'agent.
+  dégradé est signalé comme tel, et versé au `MEMORY.md` de l'agent. Le seuil se
+  mesure sur le budget de tokens de l'agent **ou** sur le remplissage de la
+  fenêtre du compte — cette seconde jauge est la seule qui existe quand l'agent
+  n'a pas de budget déclaré, c'est-à-dire le cas courant.
 - **Vue par tentative** — le détail d'un run montre qui a essayé, ce qui a
   échoué, combien de temps on a attendu et où c'est reparti. Cet encart
   n'apparaît qu'à partir de la deuxième tentative.

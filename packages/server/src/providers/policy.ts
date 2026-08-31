@@ -133,8 +133,14 @@ export function planFirstAttempt(input: {
   policy: ResiliencePolicy;
   targets: ResolvedTarget[];
   nowMs: number;
+  /**
+   * Comptes dont la fenêtre de consommation approche du plafond. Ils ne sont
+   * pas écartés : on leur préfère un compte plus calme quand il en existe un.
+   */
+  underPressure?: ReadonlySet<string>;
 }): AttemptPlan {
   const { policy, targets, nowMs } = input;
+  const pressured = input.underPressure ?? new Set<string>();
   if (targets.length === 0) {
     return {
       action: 'give_up',
@@ -145,14 +151,42 @@ export function planFirstAttempt(input: {
     };
   }
 
-  const ready = targets.find((t) => availability(t.account, nowMs).state === 'ready');
+  const isReady = (t: ResolvedTarget): boolean => availability(t.account, nowMs).state === 'ready';
+
+  /*
+   * Anticipation : le premier compte prêt *et* détendu, à défaut le premier
+   * compte prêt tout court.
+   *
+   * L'ordre déclaré n'est donc pas contourné, seulement retardé d'un cran quand
+   * la fenêtre du compte préféré est presque pleine. Le sauter définitivement
+   * sur la foi d'un plafond estimé priverait l'opérateur d'une ressource qui
+   * fonctionne peut-être encore très bien.
+   */
+  const calm = targets.find((t) => isReady(t) && !pressured.has(t.account.id));
+  if (calm) {
+    const skipped = targets.find((t) => isReady(t) && pressured.has(t.account.id));
+    return {
+      action: 'retry_same',
+      target: calm,
+      waitMs: 0,
+      requiresHandoff: false,
+      reason:
+        skipped && skipped.index < calm.index
+          ? `compte « ${calm.account.name} » — « ${skipped.account.name} » approche de sa limite d'usage`
+          : `compte « ${calm.account.name} »`,
+    };
+  }
+
+  const ready = targets.find(isReady);
   if (ready) {
     return {
       action: 'retry_same',
       target: ready,
       waitMs: 0,
       requiresHandoff: false,
-      reason: `compte « ${ready.account.name} »`,
+      reason: pressured.has(ready.account.id)
+        ? `compte « ${ready.account.name} », proche de sa limite mais seul disponible`
+        : `compte « ${ready.account.name} »`,
     };
   }
 

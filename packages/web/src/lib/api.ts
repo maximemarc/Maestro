@@ -46,6 +46,7 @@ import type {
   TmuxSessionInfo,
   TokensByBucket,
   UpsertSkillRequest,
+  AccountUsage,
   OnboardingState,
   OnboardingStep,
   ProviderAccount,
@@ -374,6 +375,9 @@ export const api = {
   prepareProfile: (slug: string) =>
     request<{ configDir: string; command: string }>('POST', '/api/providers/profiles', { slug }),
   accountSuggestions: () => request<ProviderAccountCreate[]>('GET', '/api/providers/suggestions'),
+  /** Consommation de tous les comptes sur leur fenêtre glissante. */
+  providersUsage: () => request<AccountUsage[]>('GET', '/api/providers/usage'),
+  accountUsage: (id: string) => request<AccountUsage>('GET', `/api/providers/accounts/${id}/usage`),
 
   // Politiques de résilience
   listPolicies: () => request<ResiliencePolicy[]>('GET', '/api/providers/policies'),

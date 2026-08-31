@@ -316,6 +316,7 @@ CREATE TABLE IF NOT EXISTS resilience_policies (
   quota_wait_max_sec INTEGER NOT NULL DEFAULT 900,
   switch_on_error INTEGER NOT NULL DEFAULT 1,
   handoff_threshold_pct INTEGER NOT NULL DEFAULT 80,
+  quota_pressure_pct INTEGER NOT NULL DEFAULT 85,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -469,6 +470,10 @@ function rowToProviderAccount(r: SqlRow): ProviderAccount {
     env: safeJsonParse<Record<string, string>>(str(r.env ?? '{}'), {}),
     priority: num(r.priority),
     dailyCostLimitUsd: numOrNull(r.daily_cost_limit_usd),
+    usageWindowSec: r.usage_window_sec === undefined ? 18000 : num(r.usage_window_sec),
+    windowTokenLimit: numOrNull(r.window_token_limit ?? null),
+    learnedTokenLimit: numOrNull(r.learned_token_limit ?? null),
+    learnedAt: strOrNull(r.learned_at ?? null),
     health: str(r.health) as ProviderAccount['health'],
     cooldownUntil: strOrNull(r.cooldown_until),
     lastError: strOrNull(r.last_error),
@@ -494,6 +499,7 @@ function rowToPolicy(r: SqlRow): ResiliencePolicy {
     quotaWaitMaxSec: num(r.quota_wait_max_sec),
     switchOnError: bool(r.switch_on_error),
     handoffThresholdPct: num(r.handoff_threshold_pct),
+    quotaPressurePct: r.quota_pressure_pct === undefined ? 85 : num(r.quota_pressure_pct),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
   };
@@ -852,6 +858,36 @@ export class Store {
         'runs',
         'attempt_count',
         'ALTER TABLE runs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1',
+      ],
+      /*
+       * Anticipation des quotas : fenêtre de mesure, plafond déclaré, plafond
+       * appris. Le plafond appris est nullable et le reste tant qu'un compte
+       * n'a pas heurté sa limite — on ne devine pas de valeur de départ.
+       */
+      [
+        'provider_accounts',
+        'usage_window_sec',
+        'ALTER TABLE provider_accounts ADD COLUMN usage_window_sec INTEGER NOT NULL DEFAULT 18000',
+      ],
+      [
+        'provider_accounts',
+        'window_token_limit',
+        'ALTER TABLE provider_accounts ADD COLUMN window_token_limit INTEGER',
+      ],
+      [
+        'provider_accounts',
+        'learned_token_limit',
+        'ALTER TABLE provider_accounts ADD COLUMN learned_token_limit INTEGER',
+      ],
+      [
+        'provider_accounts',
+        'learned_at',
+        'ALTER TABLE provider_accounts ADD COLUMN learned_at TEXT',
+      ],
+      [
+        'resilience_policies',
+        'quota_pressure_pct',
+        'ALTER TABLE resilience_policies ADD COLUMN quota_pressure_pct INTEGER NOT NULL DEFAULT 85',
       ],
     ];
     for (const [table, column, ddl] of added) {
@@ -1615,9 +1651,10 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO provider_accounts (id, name, kind, enabled, auth_mode, config_dir, api_key_env,
-          base_url, api_flavor, model, command, args, env, priority, daily_cost_limit_usd, health,
+          base_url, api_flavor, model, command, args, env, priority, daily_cost_limit_usd,
+          usage_window_sec, window_token_limit, learned_token_limit, learned_at, health,
           cooldown_until, last_error, last_checked_at, detail, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         account.id,
@@ -1635,6 +1672,10 @@ export class Store {
         JSON.stringify(account.env ?? {}),
         account.priority,
         account.dailyCostLimitUsd,
+        account.usageWindowSec,
+        account.windowTokenLimit,
+        account.learnedTokenLimit,
+        account.learnedAt,
         account.health,
         account.cooldownUntil,
         account.lastError,
@@ -1650,7 +1691,8 @@ export class Store {
       .prepare(
         `UPDATE provider_accounts SET name=?, kind=?, enabled=?, auth_mode=?, config_dir=?,
           api_key_env=?, base_url=?, api_flavor=?, model=?, command=?, args=?, env=?, priority=?,
-          daily_cost_limit_usd=?, health=?, cooldown_until=?, last_error=?, last_checked_at=?,
+          daily_cost_limit_usd=?, usage_window_sec=?, window_token_limit=?, learned_token_limit=?,
+          learned_at=?, health=?, cooldown_until=?, last_error=?, last_checked_at=?,
           detail=?, updated_at=? WHERE id=?`,
       )
       .run(
@@ -1668,6 +1710,10 @@ export class Store {
         JSON.stringify(account.env ?? {}),
         account.priority,
         account.dailyCostLimitUsd,
+        account.usageWindowSec,
+        account.windowTokenLimit,
+        account.learnedTokenLimit,
+        account.learnedAt,
         account.health,
         account.cooldownUntil,
         account.lastError,
@@ -1699,6 +1745,45 @@ export class Store {
     return row ? num(row.total) : 0;
   }
 
+  /**
+   * Consommation d'un compte depuis un instant donné, vue par les tentatives.
+   *
+   * Source de repli pour les comptes sans transcript (API HTTP) : elle ne voit
+   * que ce que Maestro a lancé, ce qui suffit puisque rien d'autre n'utilise
+   * cette clé au nom de Maestro.
+   */
+  accountUsageSince(
+    accountId: string,
+    sinceIso: string,
+  ): {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
+    costUsd: number;
+    sessions: number;
+  } {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens,
+                COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                COALESCE(SUM(cost_usd), 0) AS cost_usd,
+                COUNT(DISTINCT run_id) AS sessions
+         FROM run_attempts WHERE account_id = ? AND started_at >= ?`,
+      )
+      .get(accountId, sinceIso) as SqlRow | undefined;
+    return {
+      inputTokens: row ? num(row.input_tokens) : 0,
+      outputTokens: row ? num(row.output_tokens) : 0,
+      cacheReadTokens: row ? num(row.cache_read_tokens) : 0,
+      cacheWriteTokens: row ? num(row.cache_write_tokens) : 0,
+      costUsd: row ? num(row.cost_usd) : 0,
+      sessions: row ? num(row.sessions) : 0,
+    };
+  }
+
   // -- Politiques de résilience ----------------------------------------------
 
   listResiliencePolicies(): ResiliencePolicy[] {
@@ -1718,8 +1803,9 @@ export class Store {
       .prepare(
         `INSERT INTO resilience_policies (id, name, description, targets, max_attempts_per_target,
           max_total_attempts, backoff_initial_ms, backoff_factor, backoff_max_ms, backoff_jitter,
-          quota_wait_max_sec, switch_on_error, handoff_threshold_pct, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          quota_wait_max_sec, switch_on_error, handoff_threshold_pct, quota_pressure_pct,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         policy.id,
@@ -1735,6 +1821,7 @@ export class Store {
         policy.quotaWaitMaxSec,
         policy.switchOnError ? 1 : 0,
         policy.handoffThresholdPct,
+        policy.quotaPressurePct,
         policy.createdAt,
         policy.updatedAt,
       );
@@ -1746,7 +1833,7 @@ export class Store {
         `UPDATE resilience_policies SET name=?, description=?, targets=?, max_attempts_per_target=?,
           max_total_attempts=?, backoff_initial_ms=?, backoff_factor=?, backoff_max_ms=?,
           backoff_jitter=?, quota_wait_max_sec=?, switch_on_error=?, handoff_threshold_pct=?,
-          updated_at=? WHERE id=?`,
+          quota_pressure_pct=?, updated_at=? WHERE id=?`,
       )
       .run(
         policy.name,
@@ -1761,6 +1848,7 @@ export class Store {
         policy.quotaWaitMaxSec,
         policy.switchOnError ? 1 : 0,
         policy.handoffThresholdPct,
+        policy.quotaPressurePct,
         nowIso(),
         policy.id,
       );

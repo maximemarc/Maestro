@@ -220,6 +220,33 @@ export interface ProviderAccount {
    * quota fournisseur.
    */
   dailyCostLimitUsd: number | null;
+  /**
+   * Largeur de la fenêtre glissante sur laquelle la consommation est mesurée,
+   * en secondes.
+   *
+   * Cinq heures par défaut, parce que c'est la fenêtre de session des
+   * abonnements Claude. Réglable, parce que rien ne garantit que ce soit la
+   * bonne pour un autre fournisseur — ni que celle-là ne bouge jamais.
+   */
+  usageWindowSec: number;
+  /**
+   * Plafond de tokens sur la fenêtre, **déclaré** par l'opérateur. Prioritaire
+   * sur l'estimation apprise : quelqu'un qui connaît son contrat en sait plus
+   * qu'une observation.
+   */
+  windowTokenLimit: number | null;
+  /**
+   * Plafond **appris** : consommation constatée sur la fenêtre au moment où ce
+   * compte a heurté une limite d'usage.
+   *
+   * Aucun fournisseur ne publie ce chiffre pour un abonnement. Plutôt que
+   * d'inventer une valeur, Maestro retient celle qu'il a vue le jour où le mur
+   * est arrivé. C'est une estimation, et elle est traitée comme telle : elle
+   * influence l'ordre de préférence, elle ne bloque jamais un compte.
+   */
+  learnedTokenLimit: number | null;
+  /** Date de cette observation, pour juger de sa fraîcheur. */
+  learnedAt: string | null;
   health: ProviderHealth;
   /** Instant de réouverture quand `health` vaut `cooldown` ou `exhausted`. */
   cooldownUntil: string | null;
@@ -231,6 +258,11 @@ export interface ProviderAccount {
   updatedAt: string;
 }
 
+/**
+ * Ce qu'un opérateur déclare. Le plafond appris n'en fait pas partie : il vient
+ * de l'observation, et le laisser saisir mélangerait ce qu'on sait et ce qu'on
+ * a deviné.
+ */
 export type ProviderAccountCreate = Omit<
   ProviderAccount,
   | 'id'
@@ -239,9 +271,60 @@ export type ProviderAccountCreate = Omit<
   | 'lastError'
   | 'lastCheckedAt'
   | 'detail'
+  | 'learnedTokenLimit'
+  | 'learnedAt'
   | 'createdAt'
   | 'updatedAt'
 >;
+
+// ---------------------------------------------------------------------------
+// Consommation & anticipation des quotas
+// ---------------------------------------------------------------------------
+
+/**
+ * D'où vient la mesure de consommation d'un compte.
+ *
+ * La distinction n'est pas cosmétique : `transcripts` voit **tout** ce qui a
+ * tourné sur ce profil, y compris les sessions lancées à la main hors de
+ * Maestro — celles qui, sans cela, consommeraient le quota dans l'angle mort de
+ * l'orchestrateur. `attempts` ne voit que ce que Maestro a lancé, et
+ * `unavailable` dit franchement qu'on ne sait pas mesurer.
+ */
+export type UsageSource = 'transcripts' | 'attempts' | 'unavailable';
+
+/** Consommation d'un compte sur sa fenêtre glissante. */
+export interface AccountUsage {
+  accountId: string;
+  source: UsageSource;
+  windowSec: number;
+  /** Début de la fenêtre observée. */
+  since: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  /**
+   * Total retenu pour la pression.
+   *
+   * Cache de lecture exclu : il est facturé une fraction du prix et ne pèse pas
+   * comme une entrée neuve. L'inclure ferait paraître saturé un compte qui ne
+   * fait que relire un gros contexte — exactement le cas fréquent.
+   */
+  billableTokens: number;
+  costUsd: number;
+  /** Nombre de sessions distinctes vues sur la fenêtre. */
+  sessions: number;
+  /** Plafond retenu : déclaré s'il existe, sinon appris. `null` = inconnu. */
+  limitTokens: number | null;
+  /** Vrai quand le plafond vient d'une observation et non d'une déclaration. */
+  limitLearned: boolean;
+  /**
+   * Consommation rapportée au plafond, entre 0 et 1+. `null` quand aucun
+   * plafond n'est connu — et dans ce cas rien n'est déduit, plutôt que de
+   * comparer à un chiffre inventé.
+   */
+  pressure: number | null;
+}
 
 // ---------------------------------------------------------------------------
 // Classification des échecs
@@ -326,6 +409,17 @@ export interface ResiliencePolicy {
   quotaWaitMaxSec: number;
   /** Basculer de compte sur un échec qui n'est pas un quota (réseau, surcharge). */
   switchOnError: boolean;
+  /**
+   * Pression à partir de laquelle un compte est mis de côté **s'il existe une
+   * alternative plus calme**, en pourcentage de son plafond. 0 désactive
+   * l'anticipation.
+   *
+   * Mise de côté et non blocage : le plafond est le plus souvent une
+   * estimation, et refuser un compte sur une estimation reviendrait à
+   * s'interdire une ressource parfaitement utilisable. Quand tous les comptes
+   * sont sous pression, l'ordre déclaré reprend la main.
+   */
+  quotaPressurePct: number;
   /**
    * Pourcentage du budget de tokens à partir duquel un résumé de reprise est
    * capturé, avant le blocage. 0 désactive la capture anticipée — le filet de
