@@ -25,6 +25,16 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
 
+  /*
+   * Le service worker ne tourne ni dans la page ni dans Node : son contexte
+   * global est `self`, un ServiceWorkerGlobalScope. Sans cette déclaration,
+   * chaque ligne du fichier remonte en « self is not defined ».
+   */
+  {
+    files: ['packages/web/public/sw.js'],
+    languageOptions: { globals: { ...globals.serviceworker } },
+  },
+
   {
     files: ['packages/web/src/**/*.{ts,tsx}'],
     languageOptions: {

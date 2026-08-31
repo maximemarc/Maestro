@@ -96,16 +96,16 @@ mémoire fichier, approbations. Le tableau ne compare que cette zone commune.
 
 ### Manques réels de Maestro
 
-| #   | Manque                                         | OpenClaw                                                                              | Maestro                                                                            | Poids                            |
-| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------- |
-| 1   | **Multi-fournisseurs**                         | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                               | **fort**                         |
-| 2   | **Canaux**                                     | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal »    | **fort**                         |
-| 3   | **Isolation / sandbox**                        | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                                 | **fort**                         |
-| 4   | ~~**Autonomie proactive**~~ **comblé**         | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | battement de cœur : état des lieux + `HEARTBEAT.md`, l'agent décide                | moyen                            |
-| 5   | ~~**Installation / exploitation**~~ **comblé** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm run service -- install` (systemd user / LaunchAgent), Dockerfile + compose    | moyen, **peu coûteux à combler** |
-| 6   | ~~**Fédération inter-machines**~~ **comblé**   | plugin A2A : découverte DNS-SD, circuit breaker                                       | `send_to_agent` vers `agent@pair`, disjoncteur, pairs déclarés (pas de découverte) | moyen                            |
-| 7   | **Clients natifs**                             | app macOS, iOS/Android, Canvas                                                        | web responsive derrière reverse proxy                                              | faible                           |
-| 8   | **Pilotage navigateur**                        | intégré                                                                               | absent (délégable à un MCP tiers)                                                  | faible                           |
+| #   | Manque                                         | OpenClaw                                                                              | Maestro                                                                              | Poids                            |
+| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | -------------------------------- |
+| 1   | **Multi-fournisseurs**                         | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                                 | **fort**                         |
+| 2   | **Canaux**                                     | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal »      | **fort**                         |
+| 3   | **Isolation / sandbox**                        | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                                   | **fort**                         |
+| 4   | ~~**Autonomie proactive**~~ **comblé**         | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | battement de cœur : état des lieux + `HEARTBEAT.md`, l'agent décide                  | moyen                            |
+| 5   | ~~**Installation / exploitation**~~ **comblé** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm run service -- install` (systemd user / LaunchAgent), Dockerfile + compose      | moyen, **peu coûteux à combler** |
+| 6   | ~~**Fédération inter-machines**~~ **comblé**   | plugin A2A : découverte DNS-SD, circuit breaker                                       | `send_to_agent` vers `agent@pair`, disjoncteur, pairs déclarés (pas de découverte)   | moyen                            |
+| 7   | ~~**Clients natifs**~~ **traité**              | app macOS, iOS/Android, Canvas                                                        | interface installable (manifeste, icônes, fenêtre propre) — pas d'application native | faible                           |
+| 8   | ~~**Pilotage navigateur**~~ **traité**         | intégré                                                                               | délégué à un serveur MCP tiers, déclarable dans l'interface — par conception         | faible                           |
 
 Les manques 1 et 2 sont **le même problème que la Partie 1** vu sous un autre
 angle : une architecture à un seul fournisseur et un seul canal.
@@ -306,6 +306,46 @@ La reconnaissance est testée sur les trois styles d'aide répandus (clap,
 commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
 part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
 pour une absence de réponse.
+
+## Partie 2, manques n°7 et n°8 — traités le 31/08/2026, sans les coder
+
+Ces deux manques sont notés « faible », et la bonne réponse n'était pas de les
+implémenter tels quels.
+
+### n°7, clients natifs — la réponse proportionnée, pas l'imitation
+
+Une application macOS et iOS est un autre produit, avec son cycle de
+publication, ses signatures et son magasin. La construire en séance aurait donné
+une coquille qui vieillit mal.
+
+Ce qui est livré à la place : l'interface se **déclare comme application** —
+manifeste, icônes vectorielles dont une variante `maskable`, fenêtre propre sans
+barre d'adresse, icône dans le dock ou sur l'écran d'accueil. Cela couvre le
+besoin réel derrière le manque, à un coût proportionné à son poids.
+
+Deux limites dites franchement plutôt que masquées :
+
+- **Le service worker ne met rien en cache.** Maestro est un tableau de bord
+  temps réel : un shell servi depuis un cache montrerait des runs terminés comme
+  actifs et des approbations résolues comme en attente. Un écran de chargement
+  d'une demi-seconde vaut mieux qu'une information fausse qui a l'air vraie.
+  Conséquence : **aucun mode hors ligne** — sans serveur, il n'y a de toute façon
+  rien à afficher.
+- **iOS ignore le manifeste pour l'icône** d'écran d'accueil et n'accepte pas de
+  SVG. Sans jeu de PNG fourni, l'icône y retombera sur une capture de la page.
+
+### n°8, pilotage navigateur — délégué par conception
+
+Le document d'analyse le disait déjà : « délégable à un MCP tiers ». Après
+vérification, c'est exact et **rien ne manque** — le registre MCP de Maestro sait
+déclarer un serveur `stdio` externe, et l'agent qui le coche gagne ses outils de
+navigation.
+
+Réinventer cette couche reviendrait à maintenir un pilote de navigateur de plus,
+moins bon que ceux qui existent, couplé à un orchestrateur qui n'en a pas besoin.
+Le manque est donc clos par une documentation de la marche à suivre, pas par du
+code. Aucun paquet tiers n'est nommé : la forme de la déclaration est donnée,
+le choix du serveur reste à l'opérateur.
 
 ## Partie 2, manque n°6 — fédération inter-machines, livré le 31/08/2026
 

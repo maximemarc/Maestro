@@ -450,6 +450,38 @@ Au premier démarrage, le serveur affiche le **jeton d'accès** (persisté dans
 > indique où le lire : la bannière part sinon dans le journal du système, qui est
 > persistant et lisible au-delà de l'utilisateur courant.
 
+### Interface installable
+
+L'interface se déclare comme application : fenêtre propre, icône dans le dock ou
+sur l'écran d'accueil, pas de barre d'adresse. Le navigateur propose
+l'installation dès que Maestro est servi en HTTPS — ou en `localhost`, considéré
+comme sûr.
+
+Ce n'est **pas** un client natif, et ce n'en tient pas lieu : c'est la réponse
+proportionnée au besoin qu'un client natif couvrirait, pour un poste de
+commandement qui reste une interface web. Deux limites dites franchement : le
+service worker ne met **rien** en cache — un tableau de bord temps réel servi
+depuis un cache montrerait des runs terminés comme actifs — donc aucun mode hors
+ligne ; et iOS veut ses propres icônes PNG, que le dépôt ne fournit pas, si bien
+que l'icône d'écran d'accueil y retombera sur une capture de la page.
+
+### Pilotage de navigateur
+
+Maestro ne pilote pas de navigateur, et n'en pilotera pas : c'est exactement ce
+que le protocole MCP permet de déléguer. Déclare le serveur MCP de ton choix dans
+**MCP → Déclarer un serveur**, en `stdio`, puis coche-le sur les agents
+concernés — ils y gagnent les outils de navigation sans que Maestro ait à en
+embarquer un.
+
+```jsonc
+// Forme d'une déclaration stdio, quel que soit le serveur retenu
+{ "transport": "stdio", "command": "npx", "args": ["-y", "<le-serveur-mcp>"] }
+```
+
+Réinventer cette couche dans Maestro reviendrait à maintenir un pilote de
+navigateur de plus, moins bon que ceux qui existent, et à le coupler à un
+orchestrateur qui n'en a pas besoin.
+
 ## Exploitation
 
 Un orchestrateur doit tourner en continu, survivre à une fermeture de terminal et

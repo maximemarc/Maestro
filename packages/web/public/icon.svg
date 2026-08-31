@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="512" height="512">
+  <!--
+    La marque de Maestro : trois curseurs. Même dessin que le favicon, tracé en
+    vectoriel pour rester net à toutes les tailles d'icône d'application.
+  -->
+  <rect width="32" height="32" rx="7" fill="#0a0e14" />
+  <g stroke="#22d3ee" stroke-width="2.4" stroke-linecap="round" fill="none">
+    <path d="M10 7v18M16 7v18M22 7v18" />
+  </g>
+  <g fill="#22d3ee">
+    <circle cx="10" cy="12" r="3" />
+    <circle cx="16" cy="21" r="3" />
+    <circle cx="22" cy="15" r="3" />
+  </g>
+</svg>

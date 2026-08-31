@@ -19,9 +19,37 @@
       rel="icon"
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230a0e14'/><g stroke='%2322d3ee' stroke-width='2.4' stroke-linecap='round' fill='none'><path d='M10 7v18M16 7v18M22 7v18'/></g><g fill='%2322d3ee'><circle cx='10' cy='12' r='3'/><circle cx='16' cy='21' r='3'/><circle cx='22' cy='15' r='3'/></g></svg>"
     />
+    <!--
+      Installable comme une application : fenêtre propre, icône dans le dock ou
+      sur l'écran d'accueil, pas de barre d'adresse. Ce n'est pas un client
+      natif — c'est la réponse proportionnée au besoin qu'un client natif
+      couvrirait, pour un poste de commandement qui reste une interface web.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!--
+      iOS ignore le manifeste pour l'icône d'écran d'accueil et veut son propre
+      lien. Il n'accepte pas de SVG ici : sans jeu de PNG fourni, l'icône
+      retombera sur une capture de la page. Dit plutôt que masqué.
+    -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Maestro" />
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      /*
+        Enregistrement du service worker, silencieux en cas d'échec : servi en
+        HTTP sur une IP de réseau local, le navigateur le refuse (origine non
+        sécurisée). L'interface doit continuer de fonctionner exactement pareil —
+        seule l'installation devient indisponible.
+      */
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').catch(() => {});
+        });
+      }
+    </script>
   </body>
 </html>
