@@ -405,6 +405,66 @@ npm start
 Au premier démarrage, le serveur affiche le **jeton d'accès** (persisté dans
 `~/.maestro/token`). Ouvre `http://localhost:4520` (ou `:4521` en dev) et colle-le.
 
+> Le jeton n'est affiché **que sur un terminal**. Lancé comme service, Maestro
+> indique où le lire : la bannière part sinon dans le journal du système, qui est
+> persistant et lisible au-delà de l'utilisateur courant.
+
+## Exploitation
+
+Un orchestrateur doit tourner en continu, survivre à une fermeture de terminal et
+repartir après un redémarrage. Un cron qui ne s'exécute que quand une fenêtre est
+ouverte ne surveille rien.
+
+### Service utilisateur (recommandé sur un poste)
+
+```bash
+npm run service -- install     # installe et démarre
+npm run service -- status      # état rapporté par le système
+npm run service -- print       # affiche l'unité sans rien installer
+npm run service -- uninstall   # arrête et retire ; les données restent
+```
+
+Génère une unité **systemd `--user`** sous Linux, un **LaunchAgent** sous macOS.
+
+**Pourquoi un service utilisateur et non système** : Maestro réutilise
+l'authentification Claude de la machine, qui vit dans le répertoire personnel
+(`~/.claude`, ou les profils de comptes sous `<dataDir>/accounts`). Une unité
+tournant sous `root` ou sous un compte de service démarrerait, puis échouerait
+sur « Not logged in » à chaque run.
+
+Contrepartie assumée : un service utilisateur s'arrête à la déconnexion.
+L'installateur active donc la persistance de session (`loginctl enable-linger`),
+et la désinstallation ne la retire pas — d'autres services peuvent en dépendre.
+
+Ce que l'unité impose, et pourquoi :
+
+| Réglage                       | Raison                                                                                                                |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `MAESTRO_HOST=127.0.0.1`      | 🔒 un service qui démarre au boot n'a que son jeton pour barrière : publie par un reverse proxy                       |
+| `Restart=on-failure`          | un arrêt demandé sort en code 0 et ne doit pas être relancé, sinon le service devient inarrêtable                     |
+| `TimeoutStopSec=30`           | Maestro traite SIGTERM : il clôt ses sessions et ferme la base avant de sortir                                        |
+| `--env-file-if-exists`        | le dotenv est chargé par Node — **aucun secret n'entre dans le fichier d'unité**, lisible par les autres utilisateurs |
+| `After=network-online.target` | Maestro joint des API dès son démarrage ; repartir trop tôt produit une minute d'échecs inutiles                      |
+
+### Conteneur
+
+```bash
+docker compose up -d --build
+```
+
+**À savoir avant de construire** : un conteneur **n'hérite pas d'un abonnement
+Claude**. L'authentification réaliste y est une **clé d'API**
+(`ANTHROPIC_API_KEY`). Se dégradent aussi : le radar de sessions ne voit que le
+conteneur, le bac à sable d'agent exige des capacités absentes, et tmux ne
+s'attache que depuis l'intérieur.
+
+Autrement dit : l'image sert un déploiement serveur piloté par clé d'API ; pour
+un poste de travail avec abonnement, le service utilisateur est le bon outil.
+
+Le `compose.yml` publie volontairement sur `127.0.0.1:4520` — l'exposition se
+décide par le reverse proxy, pas par défaut. 🔒 En production, remplace `build`
+par une image versionnée du registre interne, jamais `latest`.
+
 ## Configuration
 
 Variables d'environnement (voir `.env.example`) :

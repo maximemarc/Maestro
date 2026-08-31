@@ -1,0 +1,26 @@
+# Ce qui n'a rien à faire dans le contexte de construction.
+#
+# Les worktrees sont des copies complètes du dépôt : les inclure multiplierait
+# la taille du contexte et ferait entrer dans l'image le travail en cours d'une
+# autre branche.
+.claude/worktrees/
+node_modules
+**/node_modules
+packages/web/dist
+dist
+
+# 🔒 Jamais de secret dans une image : le dotenv local reste sur la machine.
+# La configuration d'un conteneur passe par --env-file au lancement.
+.env
+.env.local
+.env.*.local
+
+# Données locales : base SQLite, workspaces d'agents.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log
+
+.git
+.githooks

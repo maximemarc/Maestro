@@ -162,7 +162,11 @@ describe('exécution', () => {
     const outcome = await promise;
     expect(outcome.status).toBe('failed');
     expect(outcome.failureSignal?.hint).toBe('cancelled');
-  });
+    /* Délai explicite : ce test lance un vrai processus, l'interrompt, puis
+       attend le délai de grâce sur les tuyaux. Sous charge — une construction
+       d'image en parallèle, par exemple — la marge de cinq secondes par défaut
+       s'est révélée trop juste. Le test vérifie une issue, pas une vitesse. */
+  }, 20_000);
 
   it('annonce dans le transcript que les permissions ne sont pas interceptées', async () => {
     // L'opérateur doit voir la perte de contrôle, pas la découvrir après coup.

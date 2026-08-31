@@ -96,16 +96,16 @@ mémoire fichier, approbations. Le tableau ne compare que cette zone commune.
 
 ### Manques réels de Maestro
 
-| #   | Manque                          | OpenClaw                                                                              | Maestro                                                                         | Poids                            |
-| --- | ------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------- |
-| 1   | **Multi-fournisseurs**          | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                            | **fort**                         |
-| 2   | **Canaux**                      | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal » | **fort**                         |
-| 3   | **Isolation / sandbox**         | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                              | **fort**                         |
-| 4   | **Autonomie proactive**         | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | cron : déclenchement déterministe, aucune délibération                          | moyen                            |
-| 5   | **Installation / exploitation** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm install && npm run dev` — pas de daemon, pas de service, pas d'image       | moyen, **peu coûteux à combler** |
-| 6   | **Fédération inter-machines**   | plugin A2A : découverte DNS-SD, circuit breaker                                       | `send_to_agent` intra-instance uniquement                                       | moyen                            |
-| 7   | **Clients natifs**              | app macOS, iOS/Android, Canvas                                                        | web responsive derrière reverse proxy                                           | faible                           |
-| 8   | **Pilotage navigateur**         | intégré                                                                               | absent (délégable à un MCP tiers)                                               | faible                           |
+| #   | Manque                                         | OpenClaw                                                                              | Maestro                                                                         | Poids                            |
+| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------- |
+| 1   | **Multi-fournisseurs**                         | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                            | **fort**                         |
+| 2   | **Canaux**                                     | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal » | **fort**                         |
+| 3   | **Isolation / sandbox**                        | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                              | **fort**                         |
+| 4   | **Autonomie proactive**                        | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | cron : déclenchement déterministe, aucune délibération                          | moyen                            |
+| 5   | ~~**Installation / exploitation**~~ **comblé** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm run service -- install` (systemd user / LaunchAgent), Dockerfile + compose | moyen, **peu coûteux à combler** |
+| 6   | **Fédération inter-machines**                  | plugin A2A : découverte DNS-SD, circuit breaker                                       | `send_to_agent` intra-instance uniquement                                       | moyen                            |
+| 7   | **Clients natifs**                             | app macOS, iOS/Android, Canvas                                                        | web responsive derrière reverse proxy                                           | faible                           |
+| 8   | **Pilotage navigateur**                        | intégré                                                                               | absent (délégable à un MCP tiers)                                               | faible                           |
 
 Les manques 1 et 2 sont **le même problème que la Partie 1** vu sous un autre
 angle : une architecture à un seul fournisseur et un seul canal.
@@ -306,6 +306,84 @@ La reconnaissance est testée sur les trois styles d'aide répandus (clap,
 commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
 part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
 pour une absence de réponse.
+
+## Partie 2, manque n°5 — exploitation, livré le 31/08/2026
+
+Maestro se lançait à la main. Un orchestrateur censé tenir un cron, surveiller
+des sessions et notifier des fins de run, mais qui s'arrête quand on ferme le
+terminal, contredit sa propre promesse. C'était l'écart le plus incohérent de la
+Partie 2, et le moins risqué à combler.
+
+### Le choix qui structure tout : un service _utilisateur_
+
+Maestro réutilise l'authentification Claude de la machine, qui vit dans le
+répertoire personnel (`~/.claude`, ou les profils de comptes sous
+`<dataDir>/accounts`). Une unité système sous `root` ou sous un compte de
+service démarrerait sans problème, puis échouerait sur « Not logged in » à
+chaque run — l'échec le plus déroutant possible, puisque tout aurait l'air
+correct.
+
+D'où `systemd --user` sous Linux et un LaunchAgent sous macOS. Contrepartie
+assumée et signalée : un service utilisateur s'arrête à la déconnexion, sauf
+persistance (`loginctl enable-linger`) — que l'installateur active, et que la
+désinstallation ne retire pas, d'autres services pouvant en dépendre.
+
+| Élément                             | Fichier                               |
+| ----------------------------------- | ------------------------------------- |
+| Génération d'unité, install/retrait | `packages/server/src/service.ts`      |
+| Tests des unités générées           | `packages/server/src/service.test.ts` |
+| Image                               | `Dockerfile`, `.dockerignore`         |
+| Déploiement conteneur               | `compose.yml`                         |
+
+### Trois décisions de sécurité, portées par le code
+
+- **`MAESTRO_HOST`** existe désormais, et l'unité générée impose `127.0.0.1`. Un
+  service qui démarre au boot en écoutant sur toutes les interfaces n'aurait que
+  son jeton pour barrière. Le défaut global reste `0.0.0.0` : le changer aurait
+  coupé l'accès de qui atteint Maestro depuis son réseau local. Le défaut
+  prudent va aux nouvelles installations, sans casser les existantes.
+- **Aucun secret dans l'unité.** Le dotenv est chargé par Node
+  (`--env-file-if-exists`), pas par le gestionnaire de service. Un fichier
+  d'unité — et plus encore un plist macOS — est lisible par les autres
+  utilisateurs de la machine. C'est aussi ce qui résout l'absence
+  d'`EnvironmentFile` chez launchd sans y inscrire de clé.
+- **`Restart=on-failure`, pas `always`.** Un arrêt demandé sort en code 0 ;
+  le relancer rendrait le service impossible à arrêter.
+
+### Deux défauts trouvés en installant pour de vrai
+
+1. **Le jeton d'accès partait dans le journal systemd.** La bannière de
+   démarrage l'affiche — anodin sur un terminal, inacceptable dans un journal
+   persistant lisible au-delà de l'utilisateur courant. Il n'est désormais
+   affiché que si la sortie est un terminal ; sinon Maestro indique où le lire.
+2. **Le conteneur sortait en code 1 sur SIGTERM.** Avec `CMD ["npm", "start"]`,
+   npm en PID 1 ne relaie pas proprement le signal et rapporte la fin de son
+   fils comme une erreur : tout arrêt demandé passait pour un plantage, et une
+   politique de redémarrage sur échec aurait bouclé. Node est maintenant PID 1 —
+   avec `init: true` en contrepartie, puisque Node ne récolte pas les zombies et
+   que Maestro lance des fils.
+
+Ajouté au passage : l'arrêt est devenu **idempotent**. Un gestionnaire de
+service qui renvoie SIGTERM trouvait une base déjà fermée et transformait un
+arrêt propre en plantage.
+
+### Vérifié en conditions réelles
+
+- Unité validée par `systemd-analyze verify` (code 0, aucun avertissement).
+- Service installé, démarré, redémarré et arrêté sous `systemctl --user` :
+  actif, `Result=success`, code de sortie 0. Écoute confirmée par `ss` sur
+  `127.0.0.1:4520` uniquement — sans le garde-fou, c'eût été `0.0.0.0`.
+- Image construite (901 Mo), conteneur `healthy`, utilisateur non privilégié
+  `node`, `claude`/`git`/`tmux` présents, arrêt en code 0 après correction.
+- Machine remise en l'état : service désinstallé, image et conteneurs d'essai
+  supprimés. Seul résidu, signalé : `Linger` reste actif pour l'utilisateur.
+
+**Ce que l'image ne peut pas faire, et qui est écrit dans le Dockerfile** : un
+conteneur n'hérite pas d'un abonnement Claude. L'authentification réaliste y est
+une clé d'API. Le radar ne voit que le conteneur, le bac à sable exige des
+capacités absentes, et tmux ne s'attache que de l'intérieur. L'image sert un
+déploiement serveur ; pour un poste avec abonnement, le service utilisateur est
+le bon outil.
 
 ## Abstraction canal — livrée le 31/08/2026
 

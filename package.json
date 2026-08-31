@@ -16,6 +16,7 @@
     "dev:web": "npm run dev -w @maestro/web",
     "build": "npm run build -w @maestro/web",
     "start": "npm run start -w @maestro/server",
+    "service": "npm run service -w @maestro/server --",
     "typecheck": "npm run typecheck -w @maestro/shared && npm run typecheck -w @maestro/server && npm run typecheck -w @maestro/web",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

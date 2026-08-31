@@ -266,7 +266,19 @@ if (existsSync(join(webDist, 'index.html'))) {
 metrics.start();
 radar.start();
 
+/**
+ * Arrêt propre, et une seule fois.
+ *
+ * Le garde d'idempotence compte dès que Maestro tourne comme service : un
+ * gestionnaire de service qui redémarre envoie SIGTERM puis, s'il trouve le
+ * processus encore vivant, recommence. Sans ce garde, la seconde passe fermait
+ * une base déjà fermée et transformait un arrêt propre en plantage — donc en
+ * redémarrage compté comme un échec.
+ */
+let stopping = false;
 const shutdown = async (): Promise<void> => {
+  if (stopping) return;
+  stopping = true;
   bus.log('warn', 'server', 'Arrêt de Maestro…');
   metrics.stop();
   radar.stop();
@@ -281,11 +293,24 @@ process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 
 try {
-  await app.listen({ port: config.port, host: '0.0.0.0' });
+  await app.listen({ port: config.port, host: config.host });
   bus.log('success', 'server', `Maestro v${config.version} démarré sur le port ${config.port}`);
   console.log(`\n  🎛  Maestro v${config.version}`);
   console.log(`  ➜  Interface : http://localhost:${config.port}`);
-  console.log(`  ➜  Jeton     : ${config.authToken}`);
+  /*
+   * Le jeton ne s'affiche qu'en lancement interactif.
+   *
+   * Constaté en installant Maestro comme service : la bannière part dans le
+   * journal systemd, qui est persistant et lisible au-delà de l'utilisateur
+   * courant. Un secret d'accès complet à l'API n'a rien à y faire. Sur un
+   * terminal, l'afficher reste ce qu'on veut — c'est même le seul moment où on
+   * en a besoin.
+   */
+  if (process.stdout.isTTY) {
+    console.log(`  ➜  Jeton     : ${config.authToken}`);
+  } else {
+    console.log(`  ➜  Jeton     : dans ${join(config.dataDir, 'token')} (masqué hors terminal)`);
+  }
   console.log(`  ➜  Données   : ${config.dataDir}`);
   console.log(`  ➜  MCP       : http://localhost:${config.port}/mcp (Bearer)`);
   const active = channels.list();
