@@ -16,6 +16,7 @@ import {
   type ProviderKind,
   type ResiliencePolicy,
   type Run,
+  type RunAttempt,
   type RunOrigin,
   type RunStatus,
   type SessionHandoff,
@@ -565,10 +566,27 @@ export class RunEngine {
 
       const outcome = await this.runOneAttempt(run, agent, entry, timeoutSecOverride, setup, kind);
       lastOutcome = outcome;
+      this.applyUsage(run, outcome);
 
-      this.store.updateRunAttempt({
+      /* La classification précède l'enregistrement : la tentative n'est écrite
+         qu'une fois, avec sa classe d'échec. L'écrire d'abord sans, puis la
+         corriger, laissait passer un état intermédiaire faux dans la base et
+         dans tout ce qui l'observe. */
+      const verdict =
+        outcome.status === 'succeeded'
+          ? null
+          : classifyFailure({
+              message: outcome.error ?? 'échec sans message',
+              status: outcome.failureSignal?.status ?? null,
+              headers: outcome.failureSignal?.headers ?? null,
+              code: outcome.failureSignal?.code ?? null,
+              hint: outcome.failureSignal?.hint ?? null,
+            });
+
+      const settled: RunAttempt = {
         ...attemptRow,
         status: outcome.status,
+        failureClass: verdict?.klass ?? null,
         error: outcome.error,
         inputTokens: outcome.usage.inputTokens,
         outputTokens: outcome.usage.outputTokens,
@@ -576,37 +594,20 @@ export class RunEngine {
         cacheWriteTokens: outcome.usage.cacheWriteTokens,
         costUsd: outcome.usage.costUsd,
         endedAt: nowIso(),
-        failureClass: null,
-      });
+      };
+      this.store.updateRunAttempt(settled);
+      /* Diffusé, et pas seulement enregistré : sans cet événement, un transcript
+         ouvert gardait la tentative sur « en cours » jusqu'au rechargement de
+         la page — y compris après la fin du run. */
+      this.bus.publish({ type: 'run.attempt', payload: settled });
 
-      this.applyUsage(run, outcome);
-
-      if (outcome.status === 'succeeded') {
+      if (outcome.status === 'succeeded' || !verdict) {
         this.providers.markSuccess(account?.id ?? null);
         this.finalize(run, 'succeeded', { resultText: outcome.resultText });
         return;
       }
 
-      const verdict = classifyFailure({
-        message: outcome.error ?? 'échec sans message',
-        status: outcome.failureSignal?.status ?? null,
-        headers: outcome.failureSignal?.headers ?? null,
-        code: outcome.failureSignal?.code ?? null,
-        hint: outcome.failureSignal?.hint ?? null,
-      });
       lastVerdict = verdict;
-      this.store.updateRunAttempt({
-        ...attemptRow,
-        status: 'failed',
-        failureClass: verdict.klass,
-        error: outcome.error,
-        inputTokens: outcome.usage.inputTokens,
-        outputTokens: outcome.usage.outputTokens,
-        cacheReadTokens: outcome.usage.cacheReadTokens,
-        cacheWriteTokens: outcome.usage.cacheWriteTokens,
-        costUsd: outcome.usage.costUsd,
-        endedAt: nowIso(),
-      });
       this.emitEvent(run, 'error', {
         text: `Tentative ${attemptIndex} sur « ${label} » : ${FAILURE_LABELS[verdict.klass]} — ${verdict.message}`,
       });
@@ -629,7 +630,7 @@ export class RunEngine {
         policy,
         targets: this.providers.withinBudget(this.providers.resolveTargets(policy)),
         verdict,
-        currentIndex: plan.target?.index ?? -1,
+        currentAccountId: account?.id ?? null,
         attemptsOnCurrent,
         totalAttempts: attemptIndex,
         nowMs: Date.now(),
@@ -696,20 +697,40 @@ export class RunEngine {
         usage: { ...ZERO_USAGE },
       };
     }
-    return await adapter.execute({
-      run,
-      agent,
-      account: setup.account,
-      model: setup.model,
-      prompt: setup.prompt,
-      resumeSessionId: setup.resumeSessionId,
-      workspaceDir: agent.workspaceDir,
-      timeoutSec: timeoutSecOverride ?? agent.timeoutSec,
-      abort: entry.abort,
-      env: setup.env,
-      emit: (eventKind, payload) => this.emitEvent(run, eventKind, payload),
-      onUsage: () => undefined,
-    });
+    /*
+     * Contrôleur propre à la tentative, relié à celui du run.
+     *
+     * L'annulation descend (le run coupe la tentative), elle ne remonte pas.
+     * Passer directement le contrôleur du run rendait le repli inopérant : un
+     * adaptateur qui abandonne sur son propre délai maximal annulait le
+     * contrôleur partagé, et la boucle s'arrêtait aussitôt sur
+     * `entry.abort.signal.aborted` — sans jamais essayer le compte suivant.
+     * Le garde-fou d'une tentative désarmait le mécanisme entier.
+     */
+    const attemptAbort = new AbortController();
+    const relay = (): void => attemptAbort.abort();
+    if (entry.abort.signal.aborted) attemptAbort.abort();
+    else entry.abort.signal.addEventListener('abort', relay, { once: true });
+
+    try {
+      return await adapter.execute({
+        run,
+        agent,
+        account: setup.account,
+        model: setup.model,
+        prompt: setup.prompt,
+        resumeSessionId: setup.resumeSessionId,
+        workspaceDir: agent.workspaceDir,
+        timeoutSec: timeoutSecOverride ?? agent.timeoutSec,
+        abort: attemptAbort,
+        env: setup.env,
+        emit: (eventKind, payload) => this.emitEvent(run, eventKind, payload),
+        onUsage: () => undefined,
+      });
+    } finally {
+      // Sans ce retrait, chaque tentative laisserait un écouteur derrière elle.
+      entry.abort.signal.removeEventListener('abort', relay);
+    }
   }
 
   /**

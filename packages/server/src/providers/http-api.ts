@@ -86,7 +86,15 @@ export class HttpApiAdapter implements ProviderAdapter {
     });
 
     const timeout = ctx.timeoutSec && ctx.timeoutSec > 0 ? ctx.timeoutSec * 1000 : 600_000;
-    const timer = setTimeout(() => ctx.abort.abort(), timeout);
+    /* Distinguer « le run a été annulé » de « mon propre délai a expiré » : les
+       deux se présentent comme un signal avorté, mais l'un est une décision
+       humaine et l'autre un garde-fou. Les confondre effaçait le motif réel
+       dans le transcript. */
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctx.abort.abort();
+    }, timeout);
 
     try {
       const response =
@@ -121,8 +129,16 @@ export class HttpApiAdapter implements ProviderAdapter {
         status: 'failed',
         sessionId: null,
         resultText: null,
-        error: aborted ? 'Interrompu ou délai dépassé' : error.message,
-        failureSignal: aborted ? { hint: 'cancelled' } : { code: error.code ?? null },
+        error: timedOut
+          ? `Délai maximal dépassé (${ctx.timeoutSec} s)`
+          : aborted
+            ? 'Interrompu'
+            : error.message,
+        failureSignal: timedOut
+          ? { hint: 'budget' }
+          : aborted
+            ? { hint: 'cancelled' }
+            : { code: error.code ?? null },
         usage: { ...ZERO_USAGE },
       };
     } finally {

@@ -90,7 +90,12 @@ export class ProviderService {
     const out = new Set<string>();
     if (policy.quotaPressurePct <= 0) return out;
     const threshold = policy.quotaPressurePct / 100;
-    for (const account of this.store.listProviderAccounts()) {
+    /* Seulement les comptes de cette politique. Mesurer tout le registre
+       ferait parcourir les transcripts de comptes que ce run n'utilisera
+       jamais — un coût disque payé au démarrage de chaque run, pour rien. */
+    for (const target of policy.targets) {
+      const account = this.store.getProviderAccount(target.accountId);
+      if (!account) continue;
       const usage = this.usage.usageFor(account, nowMs);
       if (usage.pressure !== null && usage.pressure >= threshold) out.add(account.id);
     }

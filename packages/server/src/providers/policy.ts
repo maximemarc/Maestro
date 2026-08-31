@@ -59,8 +59,17 @@ export interface PlanInput {
   /** Cibles résolues, dans l'ordre de la politique. */
   targets: ResolvedTarget[];
   verdict: FailureVerdict;
-  /** Index (dans `targets`) de la cible qui vient d'échouer ; -1 si aucune. */
-  currentIndex: number;
+  /**
+   * Compte qui vient d'échouer, désigné par son identifiant.
+   *
+   * Par identifiant et non par position : la liste des cibles est **résolue à
+   * neuf avant chaque décision** — un compte peut en sortir entre deux
+   * tentatives, par exemple en atteignant son plafond de dépense quotidien. Les
+   * positions se décalent alors, et un index conservé d'un tour sur l'autre
+   * désignerait un autre compte que celui qui a échoué : le routeur croirait
+   * l'éviter tout en le rejouant.
+   */
+  currentAccountId: string | null;
   /** Tentatives déjà consommées sur cette cible, celle qui échoue comprise. */
   attemptsOnCurrent: number;
   /** Tentatives consommées au total, toutes cibles confondues. */
@@ -224,10 +233,16 @@ export function planFirstAttempt(input: {
  *  6. le reste (débit, saturation, réseau), traité par attente puis bascule.
  */
 export function planRecovery(input: PlanInput): AttemptPlan {
-  const { policy, targets, verdict, currentIndex, attemptsOnCurrent, totalAttempts, nowMs } = input;
+  const { policy, targets, verdict, attemptsOnCurrent, totalAttempts, nowMs } = input;
   const random = input.random ?? Math.random;
   const label = FAILURE_LABELS[verdict.klass];
-  const current = targets[currentIndex] ?? null;
+  /* Position recalculée dans la liste du moment. `-1` si le compte fautif n'y
+     figure plus : il a alors disparu de la politique ou franchi son plafond, et
+     la suite se joue simplement sans lui. */
+  const currentIndex = input.currentAccountId
+    ? targets.findIndex((t) => t.account.id === input.currentAccountId)
+    : -1;
+  const current = currentIndex >= 0 ? (targets[currentIndex] ?? null) : null;
 
   if (verdict.klass === 'cancelled' || verdict.klass === 'budget' || verdict.klass === 'fatal') {
     return giveUp(`${label} — aucun repli n'y changerait rien`);

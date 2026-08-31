@@ -243,7 +243,7 @@ describe('quota', () => {
       policy: policy(),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass: 'quota', poisonsAccount: true, retryAfterMs: 3600_000 }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -259,7 +259,7 @@ describe('quota', () => {
       policy: policy(),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass: 'quota', poisonsAccount: true }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -272,7 +272,7 @@ describe('quota', () => {
       policy: policy({ quotaWaitMaxSec: 900 }),
       targets: targets(account({ id: 'a' })),
       verdict: verdict({ klass: 'quota', poisonsAccount: true, retryAfterMs: 120_000 }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -287,7 +287,7 @@ describe('quota', () => {
       policy: policy(),
       targets: targets(account({ id: 'a' })),
       verdict: verdict({ klass: 'quota', poisonsAccount: true, retryAfterMs: null }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -300,7 +300,7 @@ describe('quota', () => {
       policy: policy({ quotaWaitMaxSec: 60 }),
       targets: targets(account({ id: 'a' })),
       verdict: verdict({ klass: 'quota', poisonsAccount: true, retryAfterMs: 3600_000 }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -315,7 +315,7 @@ describe('authentification', () => {
       policy: policy({ maxAttemptsPerTarget: 5 }),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass: 'auth', poisonsAccount: true }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -329,7 +329,7 @@ describe('authentification', () => {
       policy: policy(),
       targets: targets(account({ id: 'a' })),
       verdict: verdict({ klass: 'auth', poisonsAccount: true }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -345,7 +345,7 @@ describe('contexte dépassé', () => {
       policy: policy(),
       targets: targets(account({ id: 'a' })),
       verdict: verdict({ klass: 'context' }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -361,7 +361,7 @@ describe('incidents passagers', () => {
       policy: policy({ maxAttemptsPerTarget: 3, backoffInitialMs: 1000, backoffFactor: 3 }),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass: 'overloaded' }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -376,7 +376,7 @@ describe('incidents passagers', () => {
       policy: policy({ maxAttemptsPerTarget: 2 }),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass: 'transient' }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 2,
       totalAttempts: 2,
       nowMs: NOW,
@@ -390,7 +390,7 @@ describe('incidents passagers', () => {
       policy: policy({ backoffInitialMs: 1000 }),
       targets: targets(account({ id: 'a' })),
       verdict: verdict({ klass: 'rate_limit', poisonsAccount: true, retryAfterMs: 30_000 }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -403,12 +403,52 @@ describe('incidents passagers', () => {
       policy: policy({ maxAttemptsPerTarget: 1, switchOnError: false }),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass: 'transient' }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
     });
     expect(plan.action).toBe('give_up');
+  });
+});
+
+describe('cible désignée par identifiant, pas par position', () => {
+  it('évite le bon compte quand la liste a rétréci entre deux tentatives', () => {
+    /*
+     * Le cas qui rendait le repli faux en silence : la liste des cibles est
+     * résolue à neuf avant chaque décision, et un compte peut en sortir entre
+     * deux tentatives — plafond de dépense quotidien atteint, par exemple. Les
+     * positions se décalent. Avec un index conservé du tour précédent, « la
+     * cible qui vient d'échouer » désignait le compte suivant, et le routeur
+     * rejouait justement celui qu'il croyait éviter.
+     */
+    const plan = planRecovery({
+      policy: policy(),
+      // 'disparu' n'est plus là ; 'a' a donc glissé de la position 1 à la 0.
+      targets: targets(account({ id: 'a' }), account({ id: 'b' })),
+      verdict: verdict({ klass: 'auth', poisonsAccount: true }),
+      currentAccountId: 'a',
+      attemptsOnCurrent: 1,
+      totalAttempts: 1,
+      nowMs: NOW,
+    });
+    expect(plan.action).toBe('switch_account');
+    expect(plan.target?.account.id).toBe('b');
+  });
+
+  it('repart proprement si le compte fautif a quitté la politique', () => {
+    const plan = planRecovery({
+      policy: policy(),
+      targets: targets(account({ id: 'a' }), account({ id: 'b' })),
+      verdict: verdict({ klass: 'transient' }),
+      currentAccountId: 'compte-supprime',
+      attemptsOnCurrent: 1,
+      totalAttempts: 1,
+      nowMs: NOW,
+    });
+    // Aucune cible courante : on ne peut pas « réessayer sur place ».
+    expect(plan.action).toBe('switch_account');
+    expect(plan.target).not.toBeNull();
   });
 });
 
@@ -418,7 +458,7 @@ describe('échecs sans recours', () => {
       policy: policy(),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 1,
       nowMs: NOW,
@@ -431,7 +471,7 @@ describe('échecs sans recours', () => {
       policy: policy({ maxTotalAttempts: 3 }),
       targets: targets(account({ id: 'a' }), account({ id: 'b' })),
       verdict: verdict({ klass: 'transient' }),
-      currentIndex: 0,
+      currentAccountId: 'a',
       attemptsOnCurrent: 1,
       totalAttempts: 3,
       nowMs: NOW,
