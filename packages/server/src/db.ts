@@ -29,6 +29,7 @@ import type {
   AgentStats,
   TokensByBucket,
   Beat,
+  FederatedPeer,
   HeartbeatConfig,
   OnboardingState,
   ProviderAccount,
@@ -387,6 +388,28 @@ CREATE TABLE IF NOT EXISTS heartbeat_beats (
 );
 CREATE INDEX IF NOT EXISTS idx_beats_at ON heartbeat_beats(at DESC);
 
+/*
+ * Instances voisines auxquelles déléguer du travail.
+ * 🔒 La colonne token_env porte le NOM d une variable d environnement, jamais un
+ * jeton : celui d un pair ouvre son API complète, et n a rien à faire dans un
+ * fichier de base sauvegardé et recopié.
+ */
+CREATE TABLE IF NOT EXISTS federated_peers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  base_url TEXT NOT NULL,
+  token_env TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  max_concurrent INTEGER NOT NULL DEFAULT 2,
+  health TEXT NOT NULL DEFAULT 'unknown',
+  open_until TEXT,
+  last_error TEXT,
+  last_checked_at TEXT,
+  detail TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -471,6 +494,24 @@ function rowToAgent(r: SqlRow): AgentConfig {
     color: str(r.color),
     pinned: r.pinned === null ? null : safeJsonParse(str(r.pinned), null),
     archived: bool(r.archived),
+    createdAt: str(r.created_at),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+function rowToPeer(r: SqlRow): FederatedPeer {
+  return {
+    id: str(r.id),
+    name: str(r.name),
+    baseUrl: str(r.base_url),
+    tokenEnv: str(r.token_env),
+    enabled: bool(r.enabled),
+    maxConcurrent: num(r.max_concurrent),
+    health: str(r.health) as FederatedPeer['health'],
+    openUntil: strOrNull(r.open_until),
+    lastError: strOrNull(r.last_error),
+    lastCheckedAt: strOrNull(r.last_checked_at),
+    detail: strOrNull(r.detail),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
   };
@@ -1665,6 +1706,79 @@ export class Store {
       )
       .run(ONBOARDING_KEY, JSON.stringify(next));
     return next;
+  }
+
+  // -- Pairs fédérés ---------------------------------------------------------
+
+  listPeers(): FederatedPeer[] {
+    return (this.db.prepare('SELECT * FROM federated_peers ORDER BY name').all() as SqlRow[]).map(
+      rowToPeer,
+    );
+  }
+
+  getPeer(id: string): FederatedPeer | null {
+    const row = this.db.prepare('SELECT * FROM federated_peers WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? rowToPeer(row) : null;
+  }
+
+  /** Recherche par nom, insensible à la casse : c'est ainsi qu'un agent le cite. */
+  getPeerByName(name: string): FederatedPeer | null {
+    const row = this.db
+      .prepare('SELECT * FROM federated_peers WHERE LOWER(name) = LOWER(?)')
+      .get(name.trim()) as SqlRow | undefined;
+    return row ? rowToPeer(row) : null;
+  }
+
+  insertPeer(peer: FederatedPeer): void {
+    this.db
+      .prepare(
+        `INSERT INTO federated_peers (id, name, base_url, token_env, enabled, max_concurrent,
+          health, open_until, last_error, last_checked_at, detail, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        peer.id,
+        peer.name,
+        peer.baseUrl,
+        peer.tokenEnv,
+        peer.enabled ? 1 : 0,
+        peer.maxConcurrent,
+        peer.health,
+        peer.openUntil,
+        peer.lastError,
+        peer.lastCheckedAt,
+        peer.detail,
+        peer.createdAt,
+        peer.updatedAt,
+      );
+  }
+
+  updatePeer(peer: FederatedPeer): void {
+    this.db
+      .prepare(
+        `UPDATE federated_peers SET name=?, base_url=?, token_env=?, enabled=?, max_concurrent=?,
+          health=?, open_until=?, last_error=?, last_checked_at=?, detail=?, updated_at=?
+         WHERE id=?`,
+      )
+      .run(
+        peer.name,
+        peer.baseUrl,
+        peer.tokenEnv,
+        peer.enabled ? 1 : 0,
+        peer.maxConcurrent,
+        peer.health,
+        peer.openUntil,
+        peer.lastError,
+        peer.lastCheckedAt,
+        peer.detail,
+        nowIso(),
+        peer.id,
+      );
+  }
+
+  deletePeer(id: string): void {
+    this.db.prepare('DELETE FROM federated_peers WHERE id = ?').run(id);
   }
 
   // -- Battement de cœur -----------------------------------------------------

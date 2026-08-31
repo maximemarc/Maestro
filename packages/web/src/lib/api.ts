@@ -48,6 +48,8 @@ import type {
   UpsertSkillRequest,
   AccountUsage,
   Beat,
+  FederatedPeer,
+  FederatedPeerCreate,
   HeartbeatConfig,
   SituationReport,
   OnboardingState,
@@ -395,6 +397,14 @@ export const api = {
   listHandoffs: (agentId?: string) =>
     request<SessionHandoff[]>('GET', `/api/handoffs${agentId ? `?agentId=${agentId}` : ''}`),
   getHandoff: (id: string) => request<SessionHandoff>('GET', `/api/handoffs/${id}`),
+
+  // Fédération
+  listPeers: () => request<FederatedPeer[]>('GET', '/api/peers'),
+  createPeer: (input: FederatedPeerCreate) => request<FederatedPeer>('POST', '/api/peers', input),
+  updatePeer: (id: string, patch: Partial<FederatedPeerCreate>) =>
+    request<FederatedPeer>('PATCH', `/api/peers/${id}`, patch),
+  deletePeer: (id: string) => request<{ ok: boolean }>('DELETE', `/api/peers/${id}`),
+  testPeer: (id: string) => request<FederatedPeer>('POST', `/api/peers/${id}/test`),
 
   // Battement de cœur
   getHeartbeat: () =>

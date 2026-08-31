@@ -26,6 +26,7 @@ import type {
 } from './types.ts';
 import type { ProviderAccount, ResiliencePolicy, RunAttempt, SessionHandoff } from './providers.ts';
 import type { Beat } from './heartbeat.ts';
+import type { FederatedPeer } from './federation.ts';
 
 // ---------------------------------------------------------------------------
 // WebSocket : événements serveur → client
@@ -68,6 +69,8 @@ export type ServerEvent =
   /* Poussé aussi pour un battement **sauté** : c'est le cas le plus fréquent, et
      celui qui explique pourquoi l'orchestrateur ne fait rien. */
   | { type: 'heartbeat.beat'; payload: Beat }
+  | { type: 'peer.updated'; payload: FederatedPeer }
+  | { type: 'peer.deleted'; payload: { id: string } }
   | { type: 'log'; payload: LogLine };
 
 export type ServerEventType = ServerEvent['type'];

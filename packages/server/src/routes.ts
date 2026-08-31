@@ -23,6 +23,7 @@ import { McpError, type McpRegistry } from './mcp-registry.ts';
 import { PluginError, type PluginService } from './plugins.ts';
 import { embeddingStatus } from './rag-embeddings.ts';
 import { RagError, type RagService } from './rag.ts';
+import { readHops, type FederationService } from './federation.ts';
 import type { HeartbeatService } from './heartbeat.ts';
 import type { HandoffService } from './providers/handoff.ts';
 import type { ProviderService } from './providers/registry.ts';
@@ -59,6 +60,7 @@ export interface Services {
   providers: ProviderService;
   handoffs: HandoffService;
   heartbeat: HeartbeatService;
+  federation: FederationService;
   telegramEnabled: boolean;
   startedAt: string;
 }
@@ -299,6 +301,23 @@ const settingsSchema = z.object({
   defaultResiliencePolicyId: z.string().max(60).nullable().optional(),
 });
 
+const peerSchema = z.object({
+  /* Ni arobase ni espace : ce nom sert dans une cible « agent@pair ». */
+  name: z
+    .string()
+    .min(1)
+    .max(40)
+    .regex(/^[^@\s]+$/, 'Ni arobase ni espace : ce nom sert dans une cible « agent@pair »'),
+  baseUrl: z.string().url().max(300),
+  /* Le NOM de la variable qui porte le jeton, jamais le jeton : celui d'un pair
+     ouvre son API complète. */
+  tokenEnv: z
+    .string()
+    .regex(/^[A-Z][A-Z0-9_]{2,80}$/, 'Nom de variable d’environnement attendu (MAJUSCULES)'),
+  enabled: z.boolean().default(true),
+  maxConcurrent: z.number().int().min(1).max(20).default(2),
+});
+
 const heartbeatSchema = z.object({
   enabled: z.boolean().optional(),
   agentId: z.string().max(60).nullable().optional(),
@@ -458,6 +477,10 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
         origin: 'manual',
         resumeSessionId,
         engineOverride: input.engine ?? null,
+        /* Sauts hérités d'une délégation fédérée. Sans cette lecture, un run
+           créé par une voisine repartirait de zéro et un aller-retour entre
+           deux machines ne serait borné par rien. */
+        federationHops: readHops(req.headers as Record<string, unknown>),
       }),
     );
     reply.code(201);
@@ -1205,6 +1228,38 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
   app.patch('/api/settings', async (req) => {
     const patch = parseOr400(settingsSchema, req.body);
     return s.store.patchSettings(patch);
+  });
+
+  // -- Fédération ------------------------------------------------------------
+
+  app.get('/api/peers', async () => s.federation.list());
+
+  app.post('/api/peers', async (req, reply) => {
+    const input = parseOr400(peerSchema, req.body);
+    reply.code(201);
+    return badRequestOn(() => s.federation.create(input));
+  });
+
+  app.patch('/api/peers/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const patch = parseOr400(patchOf(peerSchema), req.body);
+    const peer = badRequestOn(() => s.federation.update(id, patch));
+    if (!peer) return reply.code(404).send({ error: 'Pair introuvable' });
+    return peer;
+  });
+
+  app.delete('/api/peers/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!s.federation.remove(id)) return reply.code(404).send({ error: 'Pair introuvable' });
+    return { ok: true };
+  });
+
+  /** Vérifie joignabilité **et** jeton : les deux pannes de mise en place. */
+  app.post('/api/peers/:id/test', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const peer = await s.federation.test(id);
+    if (!peer) return reply.code(404).send({ error: 'Pair introuvable' });
+    return peer;
   });
 
   // -- Battement de cœur -----------------------------------------------------

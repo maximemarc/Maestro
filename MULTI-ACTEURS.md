@@ -96,16 +96,16 @@ mémoire fichier, approbations. Le tableau ne compare que cette zone commune.
 
 ### Manques réels de Maestro
 
-| #   | Manque                                         | OpenClaw                                                                              | Maestro                                                                         | Poids                            |
-| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------------------- |
-| 1   | **Multi-fournisseurs**                         | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                            | **fort**                         |
-| 2   | **Canaux**                                     | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal » | **fort**                         |
-| 3   | **Isolation / sandbox**                        | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                              | **fort**                         |
-| 4   | ~~**Autonomie proactive**~~ **comblé**         | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | battement de cœur : état des lieux + `HEARTBEAT.md`, l'agent décide             | moyen                            |
-| 5   | ~~**Installation / exploitation**~~ **comblé** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm run service -- install` (systemd user / LaunchAgent), Dockerfile + compose | moyen, **peu coûteux à combler** |
-| 6   | **Fédération inter-machines**                  | plugin A2A : découverte DNS-SD, circuit breaker                                       | `send_to_agent` intra-instance uniquement                                       | moyen                            |
-| 7   | **Clients natifs**                             | app macOS, iOS/Android, Canvas                                                        | web responsive derrière reverse proxy                                           | faible                           |
-| 8   | **Pilotage navigateur**                        | intégré                                                                               | absent (délégable à un MCP tiers)                                               | faible                           |
+| #   | Manque                                         | OpenClaw                                                                              | Maestro                                                                            | Poids                            |
+| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- | -------------------------------- |
+| 1   | **Multi-fournisseurs**                         | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                               | **fort**                         |
+| 2   | **Canaux**                                     | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal »    | **fort**                         |
+| 3   | **Isolation / sandbox**                        | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                                 | **fort**                         |
+| 4   | ~~**Autonomie proactive**~~ **comblé**         | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | battement de cœur : état des lieux + `HEARTBEAT.md`, l'agent décide                | moyen                            |
+| 5   | ~~**Installation / exploitation**~~ **comblé** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm run service -- install` (systemd user / LaunchAgent), Dockerfile + compose    | moyen, **peu coûteux à combler** |
+| 6   | ~~**Fédération inter-machines**~~ **comblé**   | plugin A2A : découverte DNS-SD, circuit breaker                                       | `send_to_agent` vers `agent@pair`, disjoncteur, pairs déclarés (pas de découverte) | moyen                            |
+| 7   | **Clients natifs**                             | app macOS, iOS/Android, Canvas                                                        | web responsive derrière reverse proxy                                              | faible                           |
+| 8   | **Pilotage navigateur**                        | intégré                                                                               | absent (délégable à un MCP tiers)                                                  | faible                           |
 
 Les manques 1 et 2 sont **le même problème que la Partie 1** vu sous un autre
 angle : une architecture à un seul fournisseur et un seul canal.
@@ -306,6 +306,56 @@ La reconnaissance est testée sur les trois styles d'aide répandus (clap,
 commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
 part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
 pour une absence de réponse.
+
+## Partie 2, manque n°6 — fédération inter-machines, livré le 31/08/2026
+
+`send_to_agent` ne franchissait pas les frontières du processus. Une machine en
+limite d'usage, ou dépourvue de l'agent compétent, ne pouvait rien passer à sa
+voisine. Un agent écrit désormais `agent@pair`.
+
+### Ce qui rend l'ajout léger
+
+Rien à inventer côté transport : l'API REST sait déjà créer un run et rendre son
+résultat, derrière un jeton. Une instance délègue en étant simplement **cliente**
+de sa voisine. Passer par la passerelle MCP aurait ajouté une couche de protocole
+pour le même effet.
+
+### Déclaration explicite, et pas de découverte
+
+OpenClaw découvre ses pairs en DNS-SD. Ce n'est **pas** repris, et c'est un choix
+argumenté : une découverte sur le réseau local accorde sa confiance à qui répond.
+Tout le modèle de sécurité de Maestro repose sur un jeton donné exprès. Une
+découverte sans établissement de confiance serait un passif, pas une
+fonctionnalité.
+
+### Trois bornes, dont une qui compte plus qu'il n'y paraît
+
+- **Disjoncteur.** Une machine éteinte ne répond pas : chaque délégation
+  attendrait son délai complet. Or l'agent qui délègue _attend_, et il occupe un
+  slot de concurrence pendant ce temps — trois délégations vers une voisine hors
+  service suffiraient à figer l'orchestrateur local. Après trois échecs, le pair
+  est écarté deux minutes et les appels échouent immédiatement, avec leur motif.
+- **Plafond de délégations simultanées** par pair : borne le fan-out, et borne le
+  rythme d'une boucle éventuelle.
+- **Un seul saut entre machines.** Les sauts voyagent dans un en-tête et sont
+  propagés au run créé chez la voisine. Un run né d'une délégation fédérée ne
+  peut donc pas repartir vers une machine. La borne repose sur la coopération du
+  pair — mais un jeton de pair ouvre déjà son API complète : la confiance est
+  totale par construction, et ce qu'on protège ici est l'accident, pas la
+  malveillance. Dit ainsi plutôt que présenté comme une sécurité.
+
+🔒 **Le jeton d'un pair est traité comme une clé de fournisseur** : la base ne
+contient que le **nom de la variable d'environnement** qui le porte.
+
+### Vérifié en conditions réelles
+
+Deux instances Maestro simultanées, « bureau » (4611) et « atelier » (4612) :
+pair déclaré côté bureau avec la seule variable `MAESTRO_PEER_ATELIER` ; test du
+pair → `ready`, `Maestro v0.1.0` ; un agent du bureau appelle
+`send_to_agent('Relecteur@atelier')` → **un run apparaît sur l'atelier**,
+attribué à « l'agent Chef d'une autre instance », et réussit. Puis la borne : un
+run créé avec `x-maestro-federation-hops: 1` tente de déléguer vers le bureau et
+reçoit « Délégation refusée : 1 saut(s) entre machines déjà effectué(s) ».
 
 ## Partie 2, manque n°4 — autonomie proactive, livré le 31/08/2026
 

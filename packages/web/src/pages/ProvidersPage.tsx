@@ -41,6 +41,7 @@ import {
 import { api } from '../lib/api';
 import { useStore } from '../lib/store';
 import { ConfirmButton, EmptyState, ErrorText, Field, Modal, Spinner } from '../components/ui';
+import { PeersCard } from '../components/PeersCard';
 
 const HEALTH_LABELS: Record<ProviderHealth, string> = {
   unknown: 'jamais testé',
@@ -358,6 +359,8 @@ export default function ProvidersPage() {
           </div>
         )}
       </section>
+
+      <PeersCard />
 
       {accountForm && (
         <AccountModal

@@ -12,7 +12,7 @@
  * qu'une des deux copies dérive. Un client Codex qui aurait échappé à la limite
  * de profondeur pourrait déclencher une cascade que rien n'arrête.
  */
-import { KANBAN_COLUMNS, type AgentConfig, type KanbanColumn } from '@maestro/shared';
+import { KANBAN_COLUMNS, parseTarget, type AgentConfig, type KanbanColumn } from '@maestro/shared';
 import type { AgentService } from './agents.ts';
 import type { Bus } from './bus.ts';
 import type { TaskService } from './kanban.ts';
@@ -24,6 +24,20 @@ export interface ControlDeps {
   bus: Bus;
   engine: RunEngine;
   maxAgentDepth: () => number;
+  /**
+   * Délégation vers une autre instance. Optionnel : une instance sans pair
+   * déclaré n'en a pas besoin, et les tests de contrôle s'en passent.
+   */
+  federation?: {
+    delegate(input: {
+      peerName: string;
+      agentName: string;
+      prompt: string;
+      wait: boolean;
+      hops: number;
+      fromAgent: string;
+    }): Promise<string>;
+  };
 }
 
 /**
@@ -37,6 +51,15 @@ export interface ActionContext {
   runId: string;
   agent: AgentConfig;
   depth: number;
+  /**
+   * Sauts entre machines déjà effectués par cette chaîne de délégation.
+   *
+   * Distinct de `depth`, qui compte les délégations **dans** une instance : une
+   * chaîne peut être profonde localement et n'avoir franchi aucune frontière,
+   * ou l'inverse. Les confondre laisserait passer un aller-retour entre deux
+   * machines à chaque niveau de profondeur.
+   */
+  federationHops?: number;
 }
 
 /** Erreur métier d'une action : message destiné au modèle, pas une panne. */
@@ -46,7 +69,8 @@ export const TASK_CREATE_DESCRIPTION = 'Créer une carte dans le kanban partagé
 export const TASK_UPDATE_DESCRIPTION =
   'Déplacer une carte du kanban et/ou y ajouter un commentaire de progression.';
 export const SEND_TO_AGENT_DESCRIPTION =
-  "Déléguer une sous-tâche à un autre agent Maestro, désigné par son nom. Par défaut la délégation est asynchrone ; avec wait=true, la réponse de l'agent est retournée directement (peut prendre plusieurs minutes).";
+  "Déléguer une sous-tâche à un autre agent Maestro, désigné par son nom. Par défaut la délégation est asynchrone ; avec wait=true, la réponse de l'agent est retournée directement (peut prendre plusieurs minutes). " +
+  "Pour confier la tâche à un agent d'une autre instance Maestro, écris « agent@pair » — les pairs déclarés sont listés dans un message d'erreur si le nom est inconnu.";
 export const MEMORY_SAVE_DESCRIPTION =
   "Consigner un fait durable dans la mémoire persistante de l'agent (MEMORY.md). Jamais de secret.";
 
@@ -112,7 +136,37 @@ export async function delegate(
   ctx: ActionContext,
   args: { agentName: string; prompt: string; wait?: boolean },
 ): Promise<string> {
-  const target = deps.agents.getByName(args.agentName);
+  /*
+   * Cible fédérée : `agent@pair` part vers une autre instance.
+   *
+   * Traité avant la résolution locale, sinon un nom contenant une arobase
+   * chercherait un agent local qui n'existe pas et rendrait « agent
+   * introuvable » — le pire message possible, puisqu'il désigne la bonne cible.
+   */
+  const { agentName, peerName } = parseTarget(args.agentName);
+  if (peerName) {
+    if (!deps.federation) {
+      throw new ActionError(
+        'La fédération n’est pas disponible sur cette instance : aucune délégation entre machines.',
+      );
+    }
+    try {
+      return await deps.federation.delegate({
+        peerName,
+        agentName,
+        prompt: args.prompt,
+        wait: args.wait ?? false,
+        hops: ctx.federationHops ?? 0,
+        fromAgent: ctx.agent.name,
+      });
+    } catch (err) {
+      /* Une erreur de fédération est un message pour le modèle — pair inconnu,
+         disjoncteur ouvert, plafond atteint — pas une panne du serveur. */
+      throw new ActionError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  const target = deps.agents.getByName(agentName);
   if (!target) {
     const names = deps.agents
       .list()

@@ -36,6 +36,7 @@ import type { Bus } from './bus.ts';
 import type { MaestroConfig } from './config.ts';
 import type { Store } from './db.ts';
 import type { TaskService } from './kanban.ts';
+import type { ControlDeps } from './mcp-actions.ts';
 import { buildMaestroServer } from './mcp-control.ts';
 import { buildCustomServer } from './mcp-custom.ts';
 import { snapshot as gitSnapshot } from './workspace-git.ts';
@@ -74,6 +75,11 @@ export interface StartRunInput {
    * autre fournisseur sans dupliquer l'agent.
    */
   resiliencePolicyId?: string | null;
+  /**
+   * Sauts entre machines déjà effectués par la chaîne de délégation qui a mené
+   * à ce run. Renseigné par la fédération, propagé aux délégations suivantes.
+   */
+  federationHops?: number;
 }
 
 /** Paramètres d'un run en file, conservés jusqu'à son démarrage effectif. */
@@ -82,6 +88,7 @@ interface QueuedParams {
   timeoutSecOverride: number | null;
   bypassConcurrencyCap: boolean;
   policyOverride: string | null;
+  federationHops: number;
 }
 
 interface ActiveRun {
@@ -92,6 +99,8 @@ interface ActiveRun {
   stderrTail: string;
   bypassConcurrencyCap: boolean;
   policyOverride: string | null;
+  /** Sauts entre machines hérités, transmis aux outils de contrôle. */
+  federationHops: number;
   /**
    * Nature d'échec déjà connue de Maestro (budget, annulation), qui prime sur
    * l'analyse du message : reclasser une décision interne en incident
@@ -136,7 +145,20 @@ export class RunEngine {
     private rag: RagService,
     private providers: ProviderService,
     private handoffs: HandoffService,
+    /**
+     * Délégation vers une autre instance.
+     *
+     * Injectée après construction plutôt qu'au constructeur : la fédération a
+     * besoin du moteur pour rien, mais le moteur en a besoin pour ses outils de
+     * contrôle. Un paramètre créerait une dépendance circulaire à l'assemblage.
+     */
+    private federation?: ControlDeps['federation'],
   ) {}
+
+  /** Branche la fédération après coup, une fois les deux services construits. */
+  attachFederation(federation: ControlDeps['federation']): void {
+    this.federation = federation;
+  }
 
   // -- API publique -----------------------------------------------------------
 
@@ -197,6 +219,7 @@ export class RunEngine {
       timeoutSecOverride: input.timeoutSecOverride ?? null,
       bypassConcurrencyCap: input.bypassConcurrencyCap ?? false,
       policyOverride: input.resiliencePolicyId ?? null,
+      federationHops: input.federationHops ?? 0,
     });
     this.queue.push(run.id);
     this.pump();
@@ -352,12 +375,14 @@ export class RunEngine {
   private async execute(runId: string): Promise<void> {
     const params = this.queuedParams.get(runId);
     this.queuedParams.delete(runId);
-    const { depth, timeoutSecOverride, bypassConcurrencyCap, policyOverride } = params ?? {
-      depth: 0,
-      timeoutSecOverride: null,
-      bypassConcurrencyCap: false,
-      policyOverride: null,
-    };
+    const { depth, timeoutSecOverride, bypassConcurrencyCap, policyOverride, federationHops } =
+      params ?? {
+        depth: 0,
+        timeoutSecOverride: null,
+        bypassConcurrencyCap: false,
+        policyOverride: null,
+        federationHops: 0,
+      };
 
     const run = this.store.getRun(runId);
     if (!run || run.status !== 'queued') return;
@@ -375,6 +400,7 @@ export class RunEngine {
       stderrTail: '',
       bypassConcurrencyCap,
       policyOverride,
+      federationHops,
       failureHint: null,
     };
     this.active.set(run.id, entry);
@@ -910,8 +936,12 @@ export class RunEngine {
         bus: this.bus,
         engine: this,
         maxAgentDepth: () => settings.maxAgentDepth,
+        federation: this.federation,
       },
-      { runId: run.id, agent, depth: entry.depth },
+      /* Les sauts entre machines voyagent avec le run : sans cela, un run créé
+         par une voisine repartirait de zéro et un aller-retour A→B→A ne serait
+         borné par rien. */
+      { runId: run.id, agent, depth: entry.depth, federationHops: entry.federationHops },
     );
 
     // Garde-fou de délai.

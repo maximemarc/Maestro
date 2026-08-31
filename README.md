@@ -376,6 +376,22 @@ savoir qu'il l'a déjà créée.
 
 - Outil MCP `maestro_send_to_agent` : un agent confie une sous-tâche à un autre
   (asynchrone, ou bloquant avec `wait=true`), profondeur limitée (anti-boucle)
+- **Fédération inter-machines** : écrire `agent@pair` confie la tâche à un agent
+  d'une **autre instance Maestro**. Une instance délègue en étant simplement
+  cliente de sa voisine, par l'API REST qui existe déjà.
+  - _Pairs déclarés, pas découverts_ : une découverte réseau accorderait sa
+    confiance à qui répond, alors que tout le modèle de sécurité repose sur un
+    jeton donné exprès.
+  - _Disjoncteur_ : une voisine éteinte ferait attendre chaque délégation son
+    délai complet — et l'agent qui délègue occupe un slot pendant ce temps. Après
+    trois échecs, le pair est écarté deux minutes et les appels échouent
+    immédiatement, avec leur motif.
+  - _Un seul saut entre machines_, propagé au run distant : un run né d'une
+    délégation fédérée ne peut pas repartir vers une machine. La borne suppose la
+    coopération du pair, ce qui est cohérent — son jeton ouvre déjà son API
+    complète.
+  - 🔒 Le jeton d'un pair est traité comme une clé de fournisseur : la base ne
+    garde que le **nom de la variable d'environnement** qui le porte.
 
 ### Canaux — Telegram, webhooks
 

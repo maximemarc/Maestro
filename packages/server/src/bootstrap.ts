@@ -21,6 +21,7 @@ import { Metrics } from './metrics.ts';
 import { ApprovalBroker } from './permissions.ts';
 import { PipelineService } from './pipelines.ts';
 import { HeartbeatService } from './heartbeat.ts';
+import { FederationService } from './federation.ts';
 import { ExternalSessionService } from './mcp-external.ts';
 import { registerMcpGateway } from './mcp-http.ts';
 import { McpRegistry } from './mcp-registry.ts';
@@ -87,6 +88,10 @@ const engine = new RunEngine(
 );
 const externalSessions = new ExternalSessionService(store, bus);
 const heartbeat = new HeartbeatService({ store, bus, agents, engine, providers });
+/* Branchée après le moteur : celui-ci en a besoin pour ses outils de contrôle,
+   et la passer au constructeur créerait une dépendance circulaire. */
+const federation = new FederationService(store, bus);
+engine.attachFederation(federation);
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
 const telegram = new TelegramChannel(config, store, bus, engine, agents, approvals);
@@ -223,6 +228,7 @@ registerRoutes(app, {
   providers,
   handoffs,
   heartbeat,
+  federation,
   telegramEnabled: telegram.enabled,
   startedAt,
 });
