@@ -1,25 +1,20 @@
 /**
  * Registre des canaux : un seul abonnement au bus, plusieurs destinataires.
  *
- * Avant, le bot Telegram s'abonnait lui-même et décidait seul de ce qui méritait
- * une notification. Chaque canal supplémentaire aurait dupliqué cet abonnement
- * *et* la règle de décision — deux copies qui auraient divergé au premier
- * réglage ajouté. Ici la règle est appliquée une fois, et le message est diffusé
- * à qui veut l'entendre.
+ * Avant, chaque passerelle s'abonnait elle-même et décidait seule de ce qui
+ * méritait une notification — trois abonnements, trois copies de la règle de
+ * décision, trois mises en page. Les copies avaient déjà divergé. Ici la règle
+ * est appliquée **une fois**, et le message est diffusé à qui veut l'entendre.
  */
 import type { Bus } from '../bus.ts';
+import type { ChatReply } from '../chat-commands.ts';
 import {
   approvalMessage,
   runEndMessage,
   shouldNotifyRunEnd,
   type MessageDeps,
 } from './messages.ts';
-import {
-  supportsInbound,
-  type Channel,
-  type ChannelMessage,
-  type InboundChannel,
-} from './types.ts';
+import type { Channel } from './types.ts';
 
 export class ChannelRegistry {
   private channels: Channel[];
@@ -48,22 +43,14 @@ export class ChannelRegistry {
     return this.channels.some((c) => c.interactive);
   }
 
-  /**
-   * Canaux qui attendent des requêtes HTTP entrantes.
-   *
-   * Exposé pour que le montage des routes reste au serveur : c'est lui qui
-   * connaît Fastify, et lui seul doit décider quels chemins existent.
-   */
-  inbound(): InboundChannel[] {
-    return this.channels.filter(supportsInbound);
-  }
-
   start(): void {
     if (this.channels.length === 0) return;
 
     this.bus.subscribe((event) => {
       if (event.type === 'approval.requested') {
-        const message = approvalMessage(this.deps, event.payload);
+        const approval = this.deps.store.getApproval(event.payload.id);
+        if (!approval) return;
+        const message = approvalMessage(this.deps, approval);
         if (message) void this.broadcast(message);
       } else if (event.type === 'run.updated' && event.payload.endedAt) {
         if (!shouldNotifyRunEnd(this.deps, event.payload)) return;
@@ -85,11 +72,11 @@ export class ChannelRegistry {
    * notification Telegram de partir. C'est précisément ce qui arriverait avec un
    * `Promise.all` sans garde.
    */
-  async broadcast(message: ChannelMessage): Promise<void> {
+  async broadcast(reply: ChatReply): Promise<void> {
     await Promise.all(
       this.channels.map(async (channel) => {
         try {
-          await channel.send(message);
+          await channel.send(reply);
         } catch (err) {
           this.bus.log(
             'warn',

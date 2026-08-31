@@ -39,7 +39,29 @@ export interface MaestroConfig {
   allowedOrigins: string[];
   telegramBotToken: string | null;
   telegramChatIds: string[];
+  /**
+   * Passerelles Discord et Slack.
+   *
+   * 🔒 Chacune exige sa liste blanche de canaux : un jeton sans liste laisse la
+   * passerelle inactive, et le démarrage le signale. Un bot qui répond partout
+   * exécute des agents pour n'importe qui.
+   */
+  discordBotToken: string | null;
+  discordChannelIds: string[];
+  /** xapp-… : ouvre la socket. Distinct du jeton de bot, qui poste. */
+  slackAppToken: string | null;
+  /** xoxb-… : poste les messages. */
+  slackBotToken: string | null;
+  slackChannelIds: string[];
   version: string;
+}
+
+/** Liste d'identifiants séparés par des virgules, entrées vides écartées. */
+function idList(raw: string | undefined): string[] {
+  return (raw ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 function ensureDir(path: string): string {
@@ -90,10 +112,12 @@ export function loadConfig(): MaestroConfig {
         ];
 
   const telegramBotToken = process.env.TELEGRAM_BOT_TOKEN?.trim() || null;
-  const telegramChatIds = (process.env.TELEGRAM_CHAT_IDS ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const telegramChatIds = idList(process.env.TELEGRAM_CHAT_IDS);
+  const discordBotToken = process.env.DISCORD_BOT_TOKEN?.trim() || null;
+  const discordChannelIds = idList(process.env.DISCORD_CHANNEL_IDS);
+  const slackAppToken = process.env.SLACK_APP_TOKEN?.trim() || null;
+  const slackBotToken = process.env.SLACK_BOT_TOKEN?.trim() || null;
+  const slackChannelIds = idList(process.env.SLACK_CHANNEL_IDS);
 
   return {
     port,
@@ -110,6 +134,11 @@ export function loadConfig(): MaestroConfig {
     allowedOrigins,
     telegramBotToken,
     telegramChatIds,
+    discordBotToken,
+    discordChannelIds,
+    slackAppToken,
+    slackBotToken,
+    slackChannelIds,
     version: '0.1.0',
   };
 }

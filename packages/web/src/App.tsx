@@ -5,6 +5,7 @@ import {
   ChartLine,
   Clock,
   Faders,
+  Flask,
   FlowArrow,
   Gauge,
   Gear,
@@ -56,6 +57,7 @@ const ApprovalsPage = lazy(() => import('./pages/ApprovalsPage'));
 const SkillsPage = lazy(() => import('./pages/SkillsPage'));
 const RoutinesPage = lazy(() => import('./pages/RoutinesPage'));
 const PipelinesPage = lazy(() => import('./pages/PipelinesPage'));
+const TrainingPage = lazy(() => import('./pages/TrainingPage'));
 const PluginsPage = lazy(() => import('./pages/PluginsPage'));
 const AnalyticsPage = lazy(() => import('./pages/AnalyticsPage'));
 const McpPage = lazy(() => import('./pages/McpPage'));
@@ -91,6 +93,7 @@ const NAV: NavItem[] = [
   { to: '/rag', icon: Books, label: 'RAG' },
   { to: '/routines', icon: Clock, label: 'Routines' },
   { to: '/pipelines', icon: FlowArrow, label: 'Pipelines' },
+  { to: '/training', icon: Flask, label: 'Entraînement' },
   { to: '/plugins', icon: PuzzlePiece, label: 'Plugins' },
   { to: '/analytics', icon: ChartLine, label: 'Analytique' },
   { to: '/settings', icon: Gear, label: 'Paramètres' },
@@ -435,6 +438,7 @@ export default function App() {
                   <Route path="/rag" element={<RagPage />} />
                   <Route path="/routines" element={<RoutinesPage />} />
                   <Route path="/pipelines" element={<PipelinesPage />} />
+                  <Route path="/training" element={<TrainingPage />} />
                   <Route path="/plugins" element={<PluginsPage />} />
                   <Route path="/analytics" element={<AnalyticsPage />} />
                   <Route path="/settings" element={<SettingsPage />} />

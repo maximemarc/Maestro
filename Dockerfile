@@ -62,10 +62,14 @@ RUN npm install -g @anthropic-ai/claude-code
 # s'exécute via tsx, qui en fait partie. Les élaguer casserait le démarrage.
 COPY --from=build /app /app
 
-# Utilisateur non privilégié. `node` existe déjà dans l'image de base ; on lui
-# donne le répertoire de données, seul emplacement où Maestro écrit.
-ENV MAESTRO_DATA_DIR=/data
-RUN mkdir -p /data && chown -R node:node /data /app
+# Utilisateur non privilégié. `node` existe déjà dans l'image de base.
+#
+# Le HOME explicite n'est pas décoratif : le SDK extrait le CLI Claude embarqué
+# dans un répertoire temporaire au démarrage, et n'écrirait nulle part sous un
+# HOME appartenant à root. Sans lui, aucune session ne démarre.
+ENV HOME=/home/node \
+    MAESTRO_DATA_DIR=/data
+RUN mkdir -p /data /home/node && chown -R node:node /data /home/node /app
 USER node
 
 VOLUME ["/data"]

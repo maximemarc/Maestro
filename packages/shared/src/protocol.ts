@@ -23,6 +23,8 @@ import type {
   ServerInfo,
   SkillDef,
   TmuxSessionInfo,
+  TrainingBatch,
+  TrainingItem,
 } from './types.ts';
 import type { ProviderAccount, ResiliencePolicy, RunAttempt, SessionHandoff } from './providers.ts';
 import type { Beat } from './heartbeat.ts';
@@ -56,6 +58,9 @@ export type ServerEvent =
   | { type: 'mcp.deleted'; payload: { id: string } }
   | { type: 'rag.updated'; payload: RagCollection }
   | { type: 'rag.deleted'; payload: { id: string } }
+  | { type: 'trainingBatch.updated'; payload: TrainingBatch }
+  | { type: 'trainingBatch.deleted'; payload: { id: string } }
+  | { type: 'trainingItem.updated'; payload: TrainingItem }
   | { type: 'metrics.tick'; payload: MetricsSnapshot }
   | { type: 'provider.updated'; payload: ProviderAccount }
   | { type: 'provider.deleted'; payload: { id: string } }

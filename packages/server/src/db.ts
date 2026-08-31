@@ -4,6 +4,7 @@
  */
 import { DatabaseSync } from 'node:sqlite';
 import type {
+  AccessToken,
   McpServerDef,
   RagCollection,
   RagDocument,
@@ -38,8 +39,13 @@ import type {
   ResilienceTarget,
   RunAttempt,
   SessionHandoff,
+  TrainingBatch,
+  TrainingBatchSpec,
+  TrainingItem,
+  TrainingItemStatus,
 } from '@maestro/shared';
 import { HEARTBEAT_DEFAULTS } from '@maestro/shared';
+import { decryptMap, encryptMap, passthroughBox, type SecretBox } from './secrets.ts';
 import { makeId, nowIso, safeJsonParse } from './util.ts';
 
 const SCHEMA = `
@@ -409,6 +415,63 @@ CREATE TABLE IF NOT EXISTS federated_peers (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS training_batches (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'draft',
+  spec TEXT NOT NULL DEFAULT '{}',
+  checkpoint_index INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  started_at TEXT,
+  ended_at TEXT
+);
+
+/*
+ * Un échantillon du lot, et son point de reprise.
+ *
+ * La colonne s'appelle « idx » et non « index » : le mot est réservé en SQL, et
+ * le devis d'identifiant qu'il faudrait sinon poser à chaque requête est une
+ * source d'erreur permanente pour un gain nul.
+ *
+ * Chaque ligne est son propre checkpoint : l'état d'un échantillon est écrit
+ * dès qu'il change, jamais à la fin du lot. Un arrêt brutal au millième
+ * échantillon ne coûte donc que celui-là.
+ */
+CREATE TABLE IF NOT EXISTS training_items (
+  id TEXT PRIMARY KEY,
+  batch_id TEXT NOT NULL REFERENCES training_batches(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  agent_id TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  run_id TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  score REAL,
+  score_source TEXT,
+  tool_call_count INTEGER NOT NULL DEFAULT 0,
+  total_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_training_items_batch ON training_items(batch_id, idx);
+CREATE INDEX IF NOT EXISTS idx_training_items_status ON training_items(batch_id, status);
+
+CREATE TABLE IF NOT EXISTS access_tokens (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  /* 🔒 Empreinte SHA-256, jamais la valeur : un vol de base ne donne aucun accès. */
+  token_hash TEXT NOT NULL UNIQUE,
+  preview TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_access_tokens_hash ON access_tokens(token_hash);
 
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
@@ -418,10 +481,20 @@ CREATE TABLE IF NOT EXISTS settings (
 
 const DEFAULT_SETTINGS: Settings = {
   instanceName: 'Maestro',
-  telegramNotifyAllRuns: false,
+  notifyAllRuns: false,
   approvalTimeoutSec: 900,
   maxConcurrentRuns: 4,
   maxAgentDepth: 2,
+  fullTrajectoryCapture: false,
+  /*
+   * Rétention illimitée par défaut.
+   *
+   * Une purge automatique sur une base existante détruirait des transcripts que
+   * personne n'a demandé à perdre. C'est un réglage qu'on active en connaissance
+   * de cause ; l'interface indique la taille de la base pour que la décision se
+   * prenne sur un chiffre.
+   */
+  retentionDays: null,
   defaultResiliencePolicyId: null,
 };
 
@@ -491,6 +564,10 @@ function rowToAgent(r: SqlRow): AgentConfig {
     maxTurns: numOrNull(r.max_turns),
     timeoutSec: numOrNull(r.timeout_sec),
     tokenBudget: numOrNull(r.token_budget),
+    sandbox:
+      r.sandbox === null || r.sandbox === undefined
+        ? null
+        : safeJsonParse<AgentConfig['sandbox']>(str(r.sandbox), null),
     color: str(r.color),
     pinned: r.pinned === null ? null : safeJsonParse(str(r.pinned), null),
     archived: bool(r.archived),
@@ -619,7 +696,13 @@ function rowToHandoff(r: SqlRow): SessionHandoff {
   };
 }
 
-function rowToMcpServer(r: SqlRow): McpServerDef {
+/**
+ * Deserialise un serveur MCP.
+ *
+ * Prend le coffre en argument : les valeurs sensibles sont chiffrees en base,
+ * et une valeur heritee en clair traverse inchangee.
+ */
+function rowToMcpServer(r: SqlRow, secrets: SecretBox): McpServerDef {
   return {
     id: str(r.id),
     slug: str(r.slug),
@@ -630,9 +713,9 @@ function rowToMcpServer(r: SqlRow): McpServerDef {
     transport: strOrNull(r.transport) as McpServerDef['transport'],
     command: strOrNull(r.command),
     args: safeJsonParse<string[]>(str(r.args ?? '[]'), []),
-    env: safeJsonParse<Record<string, string>>(str(r.env ?? '{}'), {}),
+    env: decryptMap(secrets, safeJsonParse<Record<string, string>>(str(r.env ?? '{}'), {})),
     url: strOrNull(r.url),
-    headers: safeJsonParse<Record<string, string>>(str(r.headers ?? '{}'), {}),
+    headers: decryptMap(secrets, safeJsonParse<Record<string, string>>(str(r.headers ?? '{}'), {})),
     tools: safeJsonParse<McpServerDef['tools']>(str(r.tools ?? '[]'), []),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
@@ -759,6 +842,7 @@ function rowToApproval(r: SqlRow): Approval {
     input: safeJsonParse<unknown>(str(r.input), null),
     status: str(r.status) as ApprovalStatus,
     resolvedBy: strOrNull(r.resolved_by) as ApprovalResolver | null,
+    resolvedByLabel: strOrNull(r.resolved_by_label),
     note: strOrNull(r.note),
     requestedAt: str(r.requested_at),
     resolvedAt: strOrNull(r.resolved_at),
@@ -853,7 +937,17 @@ function rowToLog(r: SqlRow): LogLine {
 export class Store {
   private db: DatabaseSync;
 
-  constructor(dbPath: string) {
+  /**
+   * Coffre à secrets.
+   *
+   * Injecte plutôt que construit : le Store ne connaît que son chemin de base,
+   * pas le repertoire de donnees ou vit la cle. Absent, on retombe sur un coffre
+   * neutre — c'est le cas des tests, qui travaillent en memoire.
+   */
+  private secrets: SecretBox;
+
+  constructor(dbPath: string, secrets: SecretBox = passthroughBox()) {
+    this.secrets = secrets;
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA foreign_keys = ON;');
@@ -964,6 +1058,22 @@ export class Store {
         'quota_pressure_pct',
         'ALTER TABLE resilience_policies ADD COLUMN quota_pressure_pct INTEGER NOT NULL DEFAULT 85',
       ],
+      /*
+       * Confinement de l'agent, en JSON, nul par défaut.
+       *
+       * Nul et non un objet désactivé : une base existante ne doit pas voir
+       * apparaître un bac à sable, même inactif, sur des agents créés avant
+       * qu'il existe. L'absence est le comportement historique, et elle se lit.
+       */
+      ['agents', 'sandbox', 'ALTER TABLE agents ADD COLUMN sandbox TEXT'],
+      /*
+       * Qui a tranché une approbation, et pas seulement par où.
+       *
+       * Nulle sur les approbations antérieures : on ne peut pas inventer une
+       * identité après coup, et prétendre le contraire serait pire que
+       * l'absence d'information.
+       */
+      ['approvals', 'resolved_by_label', 'ALTER TABLE approvals ADD COLUMN resolved_by_label TEXT'],
     ];
     for (const [table, column, ddl] of added) {
       const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as SqlRow[];
@@ -1003,8 +1113,8 @@ export class Store {
         `INSERT INTO agents (id, name, emoji, description, model, engine, permission_mode,
           approval_policy, system_prompt, cli_agent, parent_agent_id, plugin_ids, mcp_server_ids, rag_collection_ids, resilience_policy_id, workspace_dir,
           memory_enabled, allowed_tools, disallowed_tools, max_turns, timeout_sec, token_budget,
-          color, pinned, archived, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sandbox, color, pinned, archived, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         agent.id,
@@ -1029,6 +1139,7 @@ export class Store {
         agent.maxTurns,
         agent.timeoutSec,
         agent.tokenBudget,
+        agent.sandbox ? JSON.stringify(agent.sandbox) : null,
         agent.color,
         agent.pinned ? JSON.stringify(agent.pinned) : null,
         agent.archived ? 1 : 0,
@@ -1044,7 +1155,7 @@ export class Store {
           approval_policy=?, system_prompt=?, cli_agent=?, parent_agent_id=?, plugin_ids=?,
           mcp_server_ids=?, rag_collection_ids=?, resilience_policy_id=?,
           workspace_dir=?, memory_enabled=?, allowed_tools=?,
-          disallowed_tools=?, max_turns=?, timeout_sec=?, token_budget=?, color=?, pinned=?,
+          disallowed_tools=?, max_turns=?, timeout_sec=?, token_budget=?, sandbox=?, color=?, pinned=?,
           archived=?, updated_at=? WHERE id=?`,
       )
       .run(
@@ -1069,6 +1180,7 @@ export class Store {
         agent.maxTurns,
         agent.timeoutSec,
         agent.tokenBudget,
+        agent.sandbox ? JSON.stringify(agent.sandbox) : null,
         agent.color,
         agent.pinned ? JSON.stringify(agent.pinned) : null,
         agent.archived ? 1 : 0,
@@ -1300,12 +1412,14 @@ export class Store {
     status: Exclude<ApprovalStatus, 'pending'>,
     resolvedBy: ApprovalResolver,
     note: string | null,
+    /** Nom du jeton qui a tranché. Nul pour une résolution automatique. */
+    resolvedByLabel: string | null = null,
   ): Approval | null {
     this.db
       .prepare(
-        "UPDATE approvals SET status=?, resolved_by=?, note=?, resolved_at=? WHERE id=? AND status='pending'",
+        "UPDATE approvals SET status=?, resolved_by=?, resolved_by_label=?, note=?, resolved_at=? WHERE id=? AND status='pending'",
       )
-      .run(status, resolvedBy, note, nowIso(), id);
+      .run(status, resolvedBy, resolvedByLabel, note, nowIso(), id);
     return this.getApproval(id);
   }
 
@@ -1674,6 +1788,20 @@ export class Store {
       const key = str(row.key) as keyof Settings;
       (stored as Record<string, unknown>)[key] = safeJsonParse(str(row.value), undefined);
     }
+    /*
+     * Reprise de l'ancienne clé.
+     *
+     * `telegramNotifyAllRuns` datait de l'époque où Telegram était le seul
+     * canal. Renommer sans reprendre l'ancienne valeur aurait remis
+     * silencieusement à « non » le réglage de qui l'avait activé — le pire des
+     * cas, puisque rien ne l'aurait signalé.
+     */
+    const legacy = (stored as Record<string, unknown>).telegramNotifyAllRuns;
+    if (stored.notifyAllRuns === undefined && typeof legacy === 'boolean') {
+      stored.notifyAllRuns = legacy;
+    }
+    delete (stored as Record<string, unknown>).telegramNotifyAllRuns;
+
     return { ...DEFAULT_SETTINGS, ...stored };
   }
 
@@ -2265,21 +2393,21 @@ export class Store {
   // --- Serveurs MCP -------------------------------------------------------
 
   listMcpServers(): McpServerDef[] {
-    return (this.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() as SqlRow[]).map(
-      rowToMcpServer,
+    return (this.db.prepare('SELECT * FROM mcp_servers ORDER BY name').all() as SqlRow[]).map((r) =>
+      rowToMcpServer(r, this.secrets),
     );
   }
 
   getMcpServer(id: string): McpServerDef | null {
     const row = this.db.prepare('SELECT * FROM mcp_servers WHERE id = ?').get(id) as
       SqlRow | undefined;
-    return row ? rowToMcpServer(row) : null;
+    return row ? rowToMcpServer(row, this.secrets) : null;
   }
 
   getMcpServerBySlug(slug: string): McpServerDef | null {
     const row = this.db.prepare('SELECT * FROM mcp_servers WHERE slug = ?').get(slug) as
       SqlRow | undefined;
-    return row ? rowToMcpServer(row) : null;
+    return row ? rowToMcpServer(row, this.secrets) : null;
   }
 
   upsertMcpServer(def: McpServerDef): void {
@@ -2306,9 +2434,10 @@ export class Store {
         def.transport,
         def.command,
         JSON.stringify(def.args),
-        JSON.stringify(def.env),
+        // 🔒 Chiffré à l'écriture : la base ne contient plus les clés en clair.
+        JSON.stringify(encryptMap(this.secrets, def.env)),
         def.url,
-        JSON.stringify(def.headers),
+        JSON.stringify(encryptMap(this.secrets, def.headers)),
         JSON.stringify(def.tools),
         def.createdAt,
         def.updatedAt,
@@ -2716,6 +2845,397 @@ export class Store {
       resolvedBy: 'timeout' as const,
     }));
   }
+
+  // -- Jetons d'accès --------------------------------------------------------
+
+  listAccessTokens(): AccessToken[] {
+    const rows = this.db
+      .prepare('SELECT * FROM access_tokens ORDER BY created_at DESC')
+      .all() as SqlRow[];
+    return rows.map(rowToAccessToken);
+  }
+
+  insertAccessToken(token: AccessToken, hash: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO access_tokens (id, label, token_hash, preview, created_at, last_used_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        token.id,
+        token.label,
+        hash,
+        token.preview,
+        token.createdAt,
+        token.lastUsedAt,
+        token.revokedAt,
+      );
+  }
+
+  /**
+   * Retrouve un jeton actif par son empreinte.
+   *
+   * Un jeton révoqué est traité comme inexistant : la révocation doit prendre
+   * effet immédiatement, sans redémarrage ni expiration de cache.
+   */
+  findActiveAccessToken(hash: string): AccessToken | null {
+    const row = this.db
+      .prepare('SELECT * FROM access_tokens WHERE token_hash = ? AND revoked_at IS NULL')
+      .get(hash) as SqlRow | undefined;
+    return row ? rowToAccessToken(row) : null;
+  }
+
+  touchAccessToken(id: string, at: string): void {
+    this.db.prepare('UPDATE access_tokens SET last_used_at = ? WHERE id = ?').run(at, id);
+  }
+
+  /**
+   * Révoque un jeton sans l'effacer.
+   *
+   * La ligne reste : c'est elle qui permet de dire, six mois plus tard, quel
+   * jeton avait approuvé quoi. Supprimer effacerait la trace en même temps que
+   * l'accès.
+   */
+  revokeAccessToken(id: string, at: string): boolean {
+    const res = this.db
+      .prepare('UPDATE access_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+      .run(at, id);
+    return Number(res.changes) > 0;
+  }
+
+  // -- Maintenance ----------------------------------------------------------
+
+  /**
+   * Purge les événements des runs terminés avant une date.
+   *
+   * Par `ended_at` du run et non par horodatage de l'événement : un run long
+   * démarré il y a trois mois et encore actif garderait sinon ses premiers
+   * événements effacés sous ses pieds, et son transcript deviendrait un trou.
+   * Les runs en cours ne sont jamais touchés.
+   */
+  pruneRunEvents(endedBeforeIso: string): number {
+    const res = this.db
+      .prepare(
+        `DELETE FROM run_events WHERE run_id IN (
+           SELECT id FROM runs WHERE ended_at IS NOT NULL AND ended_at < ?
+         )`,
+      )
+      .run(endedBeforeIso);
+    return Number(res.changes);
+  }
+
+  /** Purge le journal applicatif par âge. */
+  pruneLogs(beforeIso: string): number {
+    const res = this.db.prepare('DELETE FROM logs WHERE ts < ?').run(beforeIso);
+    return Number(res.changes);
+  }
+
+  /** Comptages bruts, pour l'exposition de métriques. */
+  countRows(table: 'runs' | 'agents'): number {
+    // Table choisie parmi une union fermée : aucune valeur externe n'atteint
+    // cette interpolation.
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as SqlRow | undefined;
+    return row ? num(row.n) : 0;
+  }
+
+  /** Taille du fichier de base, en octets, telle que SQLite la voit. */
+  databaseBytes(): number {
+    const row = this.db
+      .prepare(
+        'SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()',
+      )
+      .get() as SqlRow | undefined;
+    return row ? num(row.bytes) : 0;
+  }
+
+  /**
+   * Compacte le fichier après une purge.
+   *
+   * SQLite ne rend pas l'espace au système : sans cela, purger un gigaoctet
+   * d'événements laisse le fichier à sa taille d'avant, et la purge paraît sans
+   * effet. `VACUUM` réécrit la base, il n'est donc lancé qu'après une purge qui
+   * a réellement supprimé quelque chose.
+   */
+  vacuum(): void {
+    this.db.exec('VACUUM');
+  }
+
+  /**
+   * Sauvegarde à chaud vers un fichier.
+   *
+   * `VACUUM INTO` produit une copie cohérente et compactée sans interrompre les
+   * écritures en cours — contrairement à une copie du fichier, qui attrape un
+   * état intermédiaire quand le journal WAL n'est pas replié.
+   */
+  backupTo(path: string): void {
+    // Le chemin est construit par le serveur, jamais reçu d'un client ; le
+    // doublement des apostrophes protège malgré tout d'un répertoire de données
+    // au nom exotique.
+    this.db.exec(`VACUUM INTO '${path.replaceAll("'", "''")}'`);
+  }
+
+  // -- Lots d'entraînement --------------------------------------------------
+
+  /**
+   * Compteurs par statut, calculés en base.
+   *
+   * Les tenir dans une colonne du lot aurait exigé de les maintenir à chaque
+   * transition d'échantillon, avec le risque de dérive que cela suppose. Un
+   * GROUP BY sur un index les rend exacts par construction.
+   */
+  private trainingCounts(batchId: string): Record<TrainingItemStatus, number> {
+    const counts: Record<TrainingItemStatus, number> = {
+      pending: 0,
+      running: 0,
+      succeeded: 0,
+      failed: 0,
+      skipped: 0,
+      cancelled: 0,
+    };
+    const rows = this.db
+      .prepare(
+        'SELECT status, COUNT(*) AS n FROM training_items WHERE batch_id = ? GROUP BY status',
+      )
+      .all(batchId) as SqlRow[];
+    for (const row of rows) {
+      const status = str(row.status) as TrainingItemStatus;
+      if (status in counts) counts[status] = num(row.n);
+    }
+    return counts;
+  }
+
+  private rowToTrainingBatch(r: SqlRow): TrainingBatch {
+    const id = str(r.id);
+    return {
+      id,
+      name: str(r.name),
+      description: str(r.description),
+      status: str(r.status) as TrainingBatch['status'],
+      spec: safeJsonParse<TrainingBatchSpec>(str(r.spec ?? '{}'), {
+        agentIds: [],
+        promptTemplates: [],
+        variables: {},
+        samples: 0,
+        workers: 1,
+        maxAttempts: 1,
+        toolWeights: [],
+        timeoutSec: null,
+        skillId: null,
+        grader: null,
+      }),
+      counts: this.trainingCounts(id),
+      checkpointIndex: num(r.checkpoint_index),
+      error: strOrNull(r.error),
+      createdAt: str(r.created_at),
+      updatedAt: str(r.updated_at),
+      startedAt: strOrNull(r.started_at),
+      endedAt: strOrNull(r.ended_at),
+    };
+  }
+
+  listTrainingBatches(): TrainingBatch[] {
+    const rows = this.db
+      .prepare('SELECT * FROM training_batches ORDER BY created_at DESC')
+      .all() as SqlRow[];
+    return rows.map((r) => this.rowToTrainingBatch(r));
+  }
+
+  getTrainingBatch(id: string): TrainingBatch | null {
+    const row = this.db.prepare('SELECT * FROM training_batches WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? this.rowToTrainingBatch(row) : null;
+  }
+
+  insertTrainingBatch(batch: TrainingBatch): void {
+    this.db
+      .prepare(
+        `INSERT INTO training_batches (id, name, description, status, spec, checkpoint_index,
+          error, created_at, updated_at, started_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        batch.id,
+        batch.name,
+        batch.description,
+        batch.status,
+        JSON.stringify(batch.spec),
+        batch.checkpointIndex,
+        batch.error,
+        batch.createdAt,
+        batch.updatedAt,
+        batch.startedAt,
+        batch.endedAt,
+      );
+  }
+
+  updateTrainingBatch(batch: TrainingBatch): void {
+    this.db
+      .prepare(
+        `UPDATE training_batches SET name=?, description=?, status=?, spec=?, checkpoint_index=?,
+          error=?, updated_at=?, started_at=?, ended_at=? WHERE id=?`,
+      )
+      .run(
+        batch.name,
+        batch.description,
+        batch.status,
+        JSON.stringify(batch.spec),
+        batch.checkpointIndex,
+        batch.error,
+        batch.updatedAt,
+        batch.startedAt,
+        batch.endedAt,
+        batch.id,
+      );
+  }
+
+  deleteTrainingBatch(id: string): boolean {
+    if (!this.getTrainingBatch(id)) return false;
+    this.db.prepare('DELETE FROM training_items WHERE batch_id = ?').run(id);
+    this.db.prepare('DELETE FROM training_batches WHERE id = ?').run(id);
+    return true;
+  }
+
+  insertTrainingItems(items: TrainingItem[]): void {
+    const stmt = this.db.prepare(
+      `INSERT INTO training_items (id, batch_id, idx, agent_id, prompt, run_id, status, attempts,
+        score, score_source, tool_call_count, total_tokens, cost_usd, error, created_at, ended_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const item of items) {
+      stmt.run(
+        item.id,
+        item.batchId,
+        item.index,
+        item.agentId,
+        item.prompt,
+        item.runId,
+        item.status,
+        item.attempts,
+        item.score,
+        item.scoreSource,
+        item.toolCallCount,
+        item.totalTokens,
+        item.costUsd,
+        item.error,
+        item.createdAt,
+        item.endedAt,
+      );
+    }
+  }
+
+  updateTrainingItem(item: TrainingItem): void {
+    this.db
+      .prepare(
+        `UPDATE training_items SET agent_id=?, prompt=?, run_id=?, status=?, attempts=?, score=?,
+          score_source=?, tool_call_count=?, total_tokens=?, cost_usd=?, error=?, ended_at=?
+         WHERE id=?`,
+      )
+      .run(
+        item.agentId,
+        item.prompt,
+        item.runId,
+        item.status,
+        item.attempts,
+        item.score,
+        item.scoreSource,
+        item.toolCallCount,
+        item.totalTokens,
+        item.costUsd,
+        item.error,
+        item.endedAt,
+        item.id,
+      );
+  }
+
+  listTrainingItems(batchId: string, limit = 2000): TrainingItem[] {
+    const rows = this.db
+      .prepare('SELECT * FROM training_items WHERE batch_id = ? ORDER BY idx LIMIT ?')
+      .all(batchId, limit) as SqlRow[];
+    return rows.map(rowToTrainingItem);
+  }
+
+  getTrainingItem(id: string): TrainingItem | null {
+    const row = this.db.prepare('SELECT * FROM training_items WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? rowToTrainingItem(row) : null;
+  }
+
+  /** Échantillons encore à faire, dans l'ordre, pour alimenter les workers. */
+  listPendingTrainingItems(batchId: string, limit: number): TrainingItem[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM training_items WHERE batch_id = ? AND status = 'pending' ORDER BY idx LIMIT ?",
+      )
+      .all(batchId, limit) as SqlRow[];
+    return rows.map(rowToTrainingItem);
+  }
+
+  /**
+   * Remet en attente les échantillons restés « running ».
+   *
+   * Appelé au démarrage : le processus qui les portait est mort, leur run est
+   * clôturé par `failStaleActiveRuns`, et personne ne viendra plus les
+   * terminer. Sans cette remise à zéro, une reprise de lot les compterait
+   * indéfiniment comme en cours.
+   */
+  resetRunningTrainingItems(): number {
+    const res = this.db
+      .prepare(
+        "UPDATE training_items SET status='pending', run_id=NULL, ended_at=NULL WHERE status='running'",
+      )
+      .run();
+    return Number(res.changes);
+  }
+
+  /** Runs et scores d'un lot, dans l'ordre — matière première de l'export. */
+  listTrainingRunRefs(batchId: string): Array<{ runId: string; score: number | null }> {
+    const rows = this.db
+      .prepare(
+        'SELECT run_id, score FROM training_items WHERE batch_id = ? AND run_id IS NOT NULL ORDER BY idx',
+      )
+      .all(batchId) as SqlRow[];
+    return rows.map((r) => ({ runId: str(r.run_id), score: numOrNull(r.score) }));
+  }
+
+  /** Score déjà attribué à un run, s'il appartient à un lot noté. */
+  scoreForRun(runId: string): number | null {
+    const row = this.db
+      .prepare('SELECT score FROM training_items WHERE run_id = ? AND score IS NOT NULL LIMIT 1')
+      .get(runId) as SqlRow | undefined;
+    return row ? numOrNull(row.score) : null;
+  }
+}
+
+function rowToAccessToken(r: SqlRow): AccessToken {
+  return {
+    id: str(r.id),
+    label: str(r.label),
+    preview: str(r.preview),
+    createdAt: str(r.created_at),
+    lastUsedAt: strOrNull(r.last_used_at),
+    revokedAt: strOrNull(r.revoked_at),
+  };
+}
+
+function rowToTrainingItem(r: SqlRow): TrainingItem {
+  return {
+    id: str(r.id),
+    batchId: str(r.batch_id),
+    index: num(r.idx),
+    agentId: str(r.agent_id),
+    prompt: str(r.prompt),
+    runId: strOrNull(r.run_id),
+    status: str(r.status) as TrainingItemStatus,
+    attempts: num(r.attempts),
+    score: numOrNull(r.score),
+    scoreSource: strOrNull(r.score_source) as TrainingItem['scoreSource'],
+    toolCallCount: num(r.tool_call_count),
+    totalTokens: num(r.total_tokens),
+    costUsd: num(r.cost_usd),
+    error: strOrNull(r.error),
+    createdAt: str(r.created_at),
+    endedAt: strOrNull(r.ended_at),
+  };
 }
 
 export function createTaskId(): string {

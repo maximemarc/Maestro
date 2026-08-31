@@ -2,68 +2,45 @@
  * API REST — toutes les mutations passent ici ; le WebSocket ne fait que pousser.
  */
 import type { FastifyInstance } from 'fastify';
+import { registerAdminRoutes } from './routes-admin.ts';
+import {
+  badRequestOn,
+  keyValueSchema,
+  parseOr400,
+  patchOf,
+  type Services,
+} from './routes-shared.ts';
+import { registerTrainingRoutes } from './routes-training.ts';
 import { z } from 'zod';
 import { KANBAN_COLUMNS } from '@maestro/shared';
 import type { OverviewResponse } from '@maestro/shared';
-import { AGENT_TEMPLATES, type AgentService } from './agents.ts';
-import type { Bus } from './bus.ts';
-import type { MaestroConfig } from './config.ts';
-import type { Store } from './db.ts';
-import type { TaskService } from './kanban.ts';
-import type { Metrics } from './metrics.ts';
-import type { ApprovalBroker } from './permissions.ts';
-import type { PipelineService } from './pipelines.ts';
-import type { RunEngine } from './runs.ts';
-import type { Scheduler } from './scheduler.ts';
-import { ConnectorError, type ConnectorRegistry } from './connectors.ts';
+import { AGENT_TEMPLATES } from './agents.ts';
+import { type Identity } from './access-tokens.ts';
+import { renderPrometheus } from './metrics-prometheus.ts';
+import { ConnectorError } from './connectors.ts';
 import { previewImport, readConfig, selectForImport } from './mcp-import.ts';
 import { buildRagGraph } from './rag-graph.ts';
 import { probeMcpServer } from './mcp-probe.ts';
-import { McpError, type McpRegistry } from './mcp-registry.ts';
-import { PluginError, type PluginService } from './plugins.ts';
+import {
+  findMcpPreset,
+  mcpPresets,
+  missingRequiredEnv,
+  presetToServerInput,
+} from './mcp-presets.ts';
+import { McpError } from './mcp-registry.ts';
+import { PluginError } from './plugins.ts';
 import { embeddingStatus } from './rag-embeddings.ts';
-import { RagError, type RagService } from './rag.ts';
-import { readHops, type FederationService } from './federation.ts';
-import type { HeartbeatService } from './heartbeat.ts';
-import type { HandoffService } from './providers/handoff.ts';
-import type { ProviderService } from './providers/registry.ts';
+import { RagError } from './rag.ts';
+import { readHops } from './federation.ts';
 import { registerProviderRoutes } from './routes-providers.ts';
-import type { SessionRadar } from './radar.ts';
-import type { SkillRegistry } from './skills.ts';
-import type { TmuxBridge } from './tmux.ts';
 import {
   WorkspaceGitError,
   branchNameFor,
   changes as gitChanges,
   commitToBranch,
   patch as gitPatch,
+  pushBranch,
 } from './workspace-git.ts';
-
-export interface Services {
-  config: MaestroConfig;
-  store: Store;
-  bus: Bus;
-  agents: AgentService;
-  skills: SkillRegistry;
-  approvals: ApprovalBroker;
-  tasks: TaskService;
-  engine: RunEngine;
-  scheduler: Scheduler;
-  pipelines: PipelineService;
-  metrics: Metrics;
-  connectors: ConnectorRegistry;
-  plugins: PluginService;
-  mcp: McpRegistry;
-  rag: RagService;
-  radar: SessionRadar;
-  tmux: TmuxBridge;
-  providers: ProviderService;
-  handoffs: HandoffService;
-  heartbeat: HeartbeatService;
-  federation: FederationService;
-  telegramEnabled: boolean;
-  startedAt: string;
-}
 
 // -- MCP ---------------------------------------------------------------------
 
@@ -72,8 +49,6 @@ export interface Services {
  * en-têtes. Les clés sont bornées pour éviter qu'un client n'envoie un objet
  * arbitrairement large, mais les valeurs restent libres : un jeton est opaque.
  */
-const keyValueSchema = z.record(z.string().min(1).max(200), z.string().max(4000));
-
 const mcpParamSchema = z.object({
   name: z.string().min(1).max(31),
   type: z.enum(['string', 'number', 'boolean']),
@@ -168,7 +143,12 @@ const ragSearchSchema = z.object({
 });
 
 const agentBaseSchema = z.object({
-  name: z.string().min(1).max(60),
+  /*
+   * Rogné avant contrôle : `min(1)` seul laissait passer un nom fait d'espaces.
+   * Un agent nommé « ␣␣␣ » est inutilisable — invisible dans l'interface, et
+   * introuvable par `/run <agent>`, qui résout par le nom.
+   */
+  name: z.string().trim().min(1).max(60),
   emoji: z.string().min(1).max(8).default('🤖'),
   description: z.string().max(500).default(''),
   model: z.string().min(1).max(80).default('sonnet'),
@@ -191,6 +171,22 @@ const agentBaseSchema = z.object({
   maxTurns: z.number().int().positive().max(500).nullable().default(null),
   timeoutSec: z.number().int().positive().max(86400).nullable().default(null),
   tokenBudget: z.number().int().positive().nullable().default(null),
+  /*
+   * Confinement, nul par défaut : ne rien dire vaut « comme avant ». Les listes
+   * de chemins et de domaines sont bornées — une liste sans limite finit dans
+   * une ligne de commande passée au bac à sable.
+   */
+  sandbox: z
+    .object({
+      enabled: z.boolean().default(false),
+      failIfUnavailable: z.boolean().default(false),
+      allowedDomains: z.array(z.string().min(1).max(253)).max(100).default([]),
+      strictAllowlist: z.boolean().default(true),
+      allowWrite: z.array(z.string().min(1).max(4096)).max(50).default([]),
+      denyRead: z.array(z.string().min(1).max(4096)).max(50).default([]),
+    })
+    .nullable()
+    .default(null),
   color: z
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
@@ -294,11 +290,13 @@ const installPluginSchema = z.object({
 
 const settingsSchema = z.object({
   instanceName: z.string().min(1).max(60).optional(),
-  telegramNotifyAllRuns: z.boolean().optional(),
+  notifyAllRuns: z.boolean().optional(),
   approvalTimeoutSec: z.number().int().min(30).max(86400).optional(),
   maxConcurrentRuns: z.number().int().min(1).max(32).optional(),
   maxAgentDepth: z.number().int().min(0).max(5).optional(),
   defaultResiliencePolicyId: z.string().max(60).nullable().optional(),
+  retentionDays: z.number().int().min(1).max(3650).nullable().optional(),
+  fullTrajectoryCapture: z.boolean().optional(),
 });
 
 const peerSchema = z.object({
@@ -329,51 +327,20 @@ const heartbeatSchema = z.object({
   skipUnderQuotaPressure: z.boolean().optional(),
 });
 
-/**
- * Schéma de mise à jour partielle : chaque champ devient optionnel ET perd sa
- * valeur par défaut.
- *
- * `.partial()` seul ne suffit pas — zod applique quand même les defaults des
- * champs absents, si bien qu'un PATCH `{ archived: true }` renverrait aussi
- * `model: 'sonnet'`, `cliAgent: null`, `color: '#22d3ee'`… et écraserait la
- * configuration de l'agent. Ici, un champ absent de la requête reste absent du
- * patch, donc inchangé côté service.
- */
-function patchOf<T extends z.ZodRawShape>(schema: z.ZodObject<T>) {
-  const shape: Record<string, z.ZodType> = {};
-  for (const [key, rawField] of Object.entries(schema.shape)) {
-    const field = rawField as z.ZodType;
-    shape[key] = (
-      field instanceof z.ZodDefault ? (field.removeDefault() as z.ZodType) : field
-    ).optional();
-  }
-  return z.object(shape);
-}
-
-/** Exécute un appel de service dont les erreurs sont des erreurs de validation métier (→ 400). */
-function badRequestOn<T>(fn: () => T): T {
-  try {
-    return fn();
-  } catch (err) {
-    const wrapped = new Error(err instanceof Error ? err.message : String(err));
-    (wrapped as Error & { statusCode?: number }).statusCode = 400;
-    throw wrapped;
-  }
-}
-
-function parseOr400<T>(schema: z.ZodType<T>, body: unknown): T {
-  const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    const err = new Error(
-      parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join(' ; '),
-    );
-    (err as Error & { statusCode?: number }).statusCode = 400;
-    throw err;
-  }
-  return parsed.data;
-}
+/* Le contrat des services vit dans `routes-shared`, d'où tous les modules le
+   tirent ; il reste réexporté ici pour ne pas casser les appelants. */
+export type { Services } from './routes-shared.ts';
 
 export function registerRoutes(app: FastifyInstance, s: Services): void {
+  /*
+   * Domaines extraits.
+   *
+   * Le découpage est structurel : les blocs ont été déplacés tels quels, et la
+   * table de routage est identique avant et après — vérifié, plutôt que relu.
+   */
+  registerAdminRoutes(app, s);
+  registerTrainingRoutes(app, s);
+
   // -- Santé & vue d'ensemble -------------------------------------------------
 
   app.get('/api/health', async () => ({ ok: true }));
@@ -597,6 +564,37 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     }
   });
 
+  /**
+   * Publie la branche d'un run et rend le lien de merge request.
+   *
+   * 🔒 Le push emprunte les identifiants git de la machine, jamais un jeton
+   * stocké par Maestro — et il ne pousse que la branche nommée, jamais en force.
+   * La merge request n'est pas créée par API : la forge propose déjà son lien
+   * dans la sortie du push, et le fabriquer aurait exigé un jeton, l'URL de
+   * l'instance et le chemin du projet.
+   */
+  app.post('/api/runs/:id/push', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const run = s.store.getRun(id);
+    if (!run) return reply.code(404).send({ error: 'Run introuvable' });
+    const agent = s.agents.get(run.agentId);
+    if (!agent) return reply.code(404).send({ error: 'Agent introuvable' });
+
+    const body = parseOr400(
+      z.object({
+        branch: z.string().min(1).max(200),
+        remote: z.string().min(1).max(80).default('origin'),
+      }),
+      req.body ?? {},
+    );
+    try {
+      return await pushBranch(agent.workspaceDir, body);
+    } catch (err) {
+      if (err instanceof WorkspaceGitError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
+
   // -- Approbations ------------------------------------------------------------------
 
   app.get('/api/approvals', async (req) => {
@@ -610,7 +608,21 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
       z.object({ decision: z.enum(['allow', 'deny']), note: z.string().max(500).optional() }),
       req.body,
     );
-    const approval = s.approvals.resolve(id, body.decision, 'web', body.note ?? null);
+    /*
+     * Qui a tranché, et pas seulement par où.
+     *
+     * C'est tout l'objet des jetons nommés : « web » ne disait rien d'utile
+     * dès qu'on est deux, alors que l'attribution est précisément ce qu'un
+     * human-in-the-loop doit garantir.
+     */
+    const identity = (req as { identity?: Identity }).identity;
+    const approval = s.approvals.resolve(
+      id,
+      body.decision,
+      'web',
+      body.note ?? null,
+      identity?.label ?? null,
+    );
     if (!approval) return reply.code(404).send({ error: 'Approbation introuvable' });
     return approval;
   });
@@ -682,6 +694,24 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
   // -- Skills -----------------------------------------------------------------------------
 
   app.get('/api/skills', async () => s.skills.list());
+
+  /**
+   * Export d'une skill au format ouvert SKILL.md.
+   *
+   * En `text/markdown` et en pièce jointe : le fichier est fait pour être
+   * republié tel quel — dans un dépôt, sur un hub communautaire — et non lu dans
+   * le navigateur.
+   */
+  app.get('/api/skills/export', async (req, reply) => {
+    const { id } = req.query as { id?: string };
+    if (!id) return reply.code(400).send({ error: 'Paramètre « id » requis' });
+    const exported = s.skills.exportSkill(id);
+    if (!exported) return reply.code(404).send({ error: 'Skill introuvable' });
+    reply
+      .header('content-type', 'text/markdown; charset=utf-8')
+      .header('content-disposition', `attachment; filename="${exported.filename}"`);
+    return exported.content;
+  });
 
   app.put('/api/skills', async (req) => {
     const input = parseOr400(skillUpsertSchema, req.body);
@@ -810,6 +840,7 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
         maxTurns: null,
         timeoutSec: null,
         tokenBudget: null,
+        sandbox: null,
         color: body.color ?? preview.agentDraft?.color ?? '#22d3ee',
         pinned: null,
         archived: false,
@@ -954,13 +985,41 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     return { ok: true };
   });
 
+  /**
+   * Exposition Prometheus.
+   *
+   * En `text/plain; version=0.0.4` : c'est le type que les collecteurs
+   * attendent, et un `application/json` les fait échouer sans message utile.
+   * La route reste derrière le jeton, comme le reste de l'API — les valeurs
+   * exposées disent l'activité de l'instance.
+   */
+  app.get('/api/metrics/prometheus', async (_req, reply) => {
+    reply.header('content-type', 'text/plain; version=0.0.4; charset=utf-8');
+    return renderPrometheus(s.metrics.snapshot(), {
+      databaseBytes: s.store.databaseBytes(),
+      agents: s.store.countRows('agents'),
+      runsTotal: s.store.countRows('runs'),
+    });
+  });
+
   // -- tmux --------------------------------------------------------------------------------------
 
   app.get('/api/tmux/sessions', async () => {
     const sessions = await s.tmux.list();
-    // Rattache agent/run quand la session correspond à un run connu.
+    /*
+     * Rattache agent et run quand la session correspond à un run connu.
+     *
+     * L'index est construit une fois. La version précédente relisait les deux
+     * cents derniers runs *à l'intérieur* du map, donc une fois par session :
+     * dix sessions ouvertes donnaient dix lectures complètes et deux mille
+     * lignes désérialisées pour retrouver dix correspondances.
+     */
+    const byTmuxSession = new Map<string, { id: string; agentId: string }>();
+    for (const run of s.store.listRuns({ limit: 200 })) {
+      if (run.tmuxSession) byTmuxSession.set(run.tmuxSession, run);
+    }
     return sessions.map((session) => {
-      const run = s.store.listRuns({ limit: 200 }).find((r) => r.tmuxSession === session.name);
+      const run = byTmuxSession.get(session.name);
       return run ? { ...session, runId: run.id, agentId: run.agentId } : session;
     });
   });
@@ -997,6 +1056,41 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
   // -- Serveurs MCP -----------------------------------------------------------
 
   app.get('/api/mcp-servers', async () => s.mcp.list());
+
+  /**
+   * Catalogue de serveurs prêts à déclarer.
+   *
+   * Sert de raccourci, pas de dépendance : ces serveurs se déclarent aussi à la
+   * main, et le catalogue ne fait que dispenser de connaître leur nom de paquet.
+   */
+  app.get('/api/mcp-presets', async () => mcpPresets());
+
+  app.post('/api/mcp-presets/:slug/install', async (req, reply) => {
+    const { slug } = req.params as { slug: string };
+    const preset = findMcpPreset(slug);
+    if (!preset) return reply.code(404).send({ error: `Preset inconnu : ${slug}` });
+
+    const body = parseOr400(
+      z.object({
+        env: keyValueSchema.default({}),
+        args: z.array(z.string().max(2000)).max(30).default([]),
+      }),
+      req.body ?? {},
+    );
+    const missing = missingRequiredEnv(preset, body.env);
+    if (missing.length > 0) {
+      return reply
+        .code(400)
+        .send({ error: `Variables requises manquantes : ${missing.join(', ')}` });
+    }
+    try {
+      reply.code(201);
+      return s.mcp.create(presetToServerInput(preset, { env: body.env, args: body.args }));
+    } catch (err) {
+      if (err instanceof McpError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
 
   app.post('/api/mcp-servers', async (req, reply) => {
     const body = mcpServerSchema.parse(req.body);

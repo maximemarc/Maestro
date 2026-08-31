@@ -17,12 +17,15 @@ import type { AgentService } from './agents.ts';
 import type { Bus } from './bus.ts';
 import type { TaskService } from './kanban.ts';
 import type { RunEngine } from './runs.ts';
+import type { SkillRegistry } from './skills.ts';
 
 export interface ControlDeps {
   tasks: TaskService;
   agents: AgentService;
   bus: Bus;
   engine: RunEngine;
+  /** Registre des skills — l'agent y consigne ses méthodes réutilisables. */
+  skills: SkillRegistry;
   maxAgentDepth: () => number;
   /**
    * Délégation vers une autre instance. Optionnel : une instance sans pair

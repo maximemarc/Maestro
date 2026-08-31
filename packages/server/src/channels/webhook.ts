@@ -21,7 +21,8 @@
  * comme les clés d'API des comptes.
  */
 import type { Bus } from '../bus.ts';
-import { renderPlainText, type Channel, type ChannelMessage } from './types.ts';
+import { renderPlain, type ChatReply } from '../chat-commands.ts';
+import { withResolutionHint, type Channel } from './types.ts';
 
 /** Dialecte de la charge utile attendu par le service destinataire. */
 export type WebhookFormat = 'slack' | 'discord' | 'raw';
@@ -67,9 +68,9 @@ export class WebhookChannel implements Channel {
     /* Rien à arrêter : le canal n'ouvre ni boucle ni connexion persistante. */
   }
 
-  async send(message: ChannelMessage): Promise<void> {
+  async send(reply: ChatReply): Promise<void> {
     if (!this.enabled) return;
-    const text = renderPlainText(message, this.config.detail === 'full');
+    const text = renderPlain(withResolutionHint(stripDetail(reply, this.config.detail)));
     const payload = buildPayload(this.config.format, text);
 
     for (const url of this.config.urls) {
@@ -94,6 +95,19 @@ export class WebhookChannel implements Channel {
       }
     }
   }
+}
+
+/**
+ * Retire le contenu de travail, sauf réglage contraire.
+ *
+ * 🔒 C'est le garde-fou du canal : sans lui, une sortie de run — du code, des
+ * extraits de dossier, des noms de clients — partirait vers un service tiers
+ * qui la stockera et l'indexera. `full` est un choix que l'opérateur pose, pas
+ * un défaut qu'il subit.
+ */
+export function stripDetail(reply: ChatReply, detail: WebhookDetail): ChatReply {
+  if (detail === 'full') return reply;
+  return { ...reply, lines: reply.lines.filter((l) => !l.detail) };
 }
 
 /**

@@ -3,36 +3,33 @@
  *
  * Ce que cette couche doit garantir, et qui ne se voit pas autrement :
  *
- * - un message est **structuré**, jamais du balisage. Une notification qui
- *   partirait en HTML Telegram s'afficherait littéralement dans Discord ;
  * - la règle « faut-il notifier » est appliquée **une seule fois**, pour tous
- *   les canaux — c'est elle qu'un second canal aurait recopiée puis laissée
- *   diverger ;
+ *   les canaux. C'est elle que les trois passerelles avaient recopiée, puis
+ *   laissée diverger — celle de Slack ignorait les routines que Telegram
+ *   honorait ;
+ * - un message est une **structure** de spans, jamais du balisage : c'est ce
+ *   qui permet à quatre rendus de rester justes sans se recopier ;
  * - un canal en panne n'empêche pas les autres de recevoir ;
- * - un canal sortant seul ne perd pas les actions : il ne peut pas les rendre
- *   cliquables, il doit dire où aller ;
- * - le webhook n'exporte pas le travail d'un agent vers un service tiers sans
- *   qu'on l'ait demandé.
+ * - un canal non interactif ne perd pas les approbations : il ne peut pas les
+ *   rendre cliquables, il doit dire où trancher ;
+ * - 🔒 le webhook n'exporte pas le travail d'un agent vers un service tiers
+ *   sans qu'on l'ait demandé.
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { Approval, Run } from '@maestro/shared';
 import type { AgentService } from '../agents.ts';
 import type { Bus } from '../bus.ts';
 import type { Store } from '../db.ts';
-import type { RunEngine } from '../runs.ts';
+import { renderHtml, renderMrkdwn, renderPlain, type ChatReply } from '../chat-commands.ts';
 import {
   approvalMessage,
-  parseApprovalAction,
-  parseCommand,
-  runCommand,
   runEndMessage,
   shouldNotifyRunEnd,
   type MessageDeps,
 } from './messages.ts';
 import { ChannelRegistry } from './registry.ts';
-import { render } from './telegram.ts';
-import { renderPlainText, type Channel, type ChannelMessage } from './types.ts';
-import { buildPayload, WebhookChannel, webhookConfigFromEnv } from './webhook.ts';
+import { parseApprovalAction, withResolutionHint, type Channel } from './types.ts';
+import { buildPayload, stripDetail, WebhookChannel, webhookConfigFromEnv } from './webhook.ts';
 
 function run(overrides: Partial<Run> = {}): Run {
   return {
@@ -52,250 +49,236 @@ function run(overrides: Partial<Run> = {}): Run {
   } as unknown as Run;
 }
 
+function approval(overrides: Partial<Approval> = {}): Approval {
+  return {
+    id: 'ap_1',
+    runId: 'run_1',
+    agentId: 'ag_1',
+    toolName: 'Bash',
+    input: { command: 'ls' },
+    status: 'pending',
+    ...overrides,
+  } as unknown as Approval;
+}
+
 function deps(options: { notifyAll?: boolean; notifyRoutine?: boolean } = {}): MessageDeps {
   return {
     store: {
-      getSettings: () => ({ telegramNotifyAllRuns: options.notifyAll ?? false }),
+      getSettings: () => ({ notifyAllRuns: options.notifyAll ?? false }),
       getRoutine: () => ({ notify: options.notifyRoutine ?? false }),
-      listApprovals: () => [],
-      countPendingApprovals: () => 2,
     } as unknown as Store,
     agents: {
-      get: () => ({
-        id: 'ag_1',
-        name: 'Comptabilité',
-        emoji: '📊',
-        model: 'sonnet',
-        engine: 'sdk',
-      }),
-      list: () => [
-        { id: 'ag_1', name: 'Comptabilité', emoji: '📊', model: 'sonnet', engine: 'sdk' },
-      ],
-      getByName: (n: string) =>
-        n === 'Comptabilité' ? { id: 'ag_1', name: 'Comptabilité', emoji: '📊' } : null,
+      get: () => ({ id: 'ag_1', name: 'Comptabilité', emoji: '📊' }),
     } as unknown as AgentService,
-    engine: {
-      activeCount: () => 1,
-      queuedCount: () => 0,
-      start: () => ({ id: 'run_new' }),
-    } as unknown as RunEngine,
   };
 }
 
+// ---------------------------------------------------------------------------
+// La décision de notifier, appliquée une seule fois
+// ---------------------------------------------------------------------------
+
 describe('décision de notifier', () => {
-  it('notifie un run lancé depuis un canal', () => {
-    expect(shouldNotifyRunEnd(deps(), run({ origin: 'telegram' }))).toBe(true);
+  /* Les trois origines conversationnelles, et pas seulement Telegram : c'est
+     précisément là que les copies avaient divergé. */
+  it('notifie un run lancé depuis n’importe quel canal', () => {
+    for (const origin of ['telegram', 'discord', 'slack'] as const) {
+      expect(shouldNotifyRunEnd(deps(), run({ origin }))).toBe(true);
+    }
   });
 
   it('ne notifie pas un run manuel par défaut', () => {
-    // Un orchestrateur qui notifie tout finit par n'être plus lu.
     expect(shouldNotifyRunEnd(deps(), run({ origin: 'manual' }))).toBe(false);
   });
 
   it('notifie tout quand le réglage global le demande', () => {
-    expect(shouldNotifyRunEnd(deps({ notifyAll: true }), run())).toBe(true);
+    expect(shouldNotifyRunEnd(deps({ notifyAll: true }), run({ origin: 'manual' }))).toBe(true);
   });
 
-  it('suit le réglage de la routine qui a déclenché le run', () => {
-    const r = run({ origin: 'routine', originId: 'rtn_1' });
+  it('notifie une routine qui l’a demandé, pas les autres', () => {
+    const r = run({ origin: 'routine', originId: 'rt_1' });
     expect(shouldNotifyRunEnd(deps({ notifyRoutine: true }), r)).toBe(true);
-    expect(shouldNotifyRunEnd(deps({ notifyRoutine: false }), r)).toBe(false);
+    expect(shouldNotifyRunEnd(deps(), r)).toBe(false);
   });
 
-  it('ne notifie pas un run encore en cours', () => {
+  it('ne notifie pas un run qui n’est pas terminé', () => {
     expect(shouldNotifyRunEnd(deps({ notifyAll: true }), run({ endedAt: null }))).toBe(false);
   });
 });
 
-describe('contenu des messages', () => {
-  it('rend un message structuré, sans balisage', () => {
-    /* Le balisage appartient au canal : une chaîne HTML fabriquée ici
-       s'afficherait telle quelle dans Discord ou dans un webhook. */
-    const message = runEndMessage(deps(), run({ resultText: 'Travail fini' }));
-    const serialised = JSON.stringify(message);
-    expect(serialised).not.toContain('<b>');
-    expect(message.fields?.map((f) => f.label)).toContain('Coût');
-    expect(message.body).toBe('Travail fini');
+// ---------------------------------------------------------------------------
+// Structure et rendus
+// ---------------------------------------------------------------------------
+
+describe('message structuré', () => {
+  it('ne contient aucun balisage : le rendu appartient au canal', () => {
+    const reply = runEndMessage(deps(), run({ resultText: 'Fait <b>gras</b> & fini' }));
+    const flat = JSON.stringify(reply);
+    expect(flat).not.toContain('<b>Run');
+    expect(flat).not.toContain('**Run');
   });
 
-  it('ne mentionne les tentatives que lorsqu’il y a eu bascule', () => {
-    const simple = runEndMessage(deps(), run());
-    expect(simple.fields?.some((f) => f.label === 'Tentatives')).toBe(false);
-    const switched = runEndMessage(deps(), run({ attemptCount: 3, accountName: 'Claude perso' }));
-    const field = switched.fields?.find((f) => f.label === 'Tentatives');
-    expect(field?.value).toContain('Claude perso');
+  /* Le même message, trois balisages. Une erreur d'échappement ne casserait
+     qu'un canal sur trois — le pire cas à déboguer. */
+  it('se rend correctement dans les trois dialectes', () => {
+    const reply = runEndMessage(deps(), run());
+    expect(renderHtml(reply)).toContain('<b>Run terminé</b>');
+    expect(renderMrkdwn(reply)).toContain('*Run terminé*');
+    expect(renderPlain(reply)).toContain('Run terminé');
+    expect(renderPlain(reply)).not.toContain('*');
   });
 
-  it('porte les deux actions d’une approbation en attente', () => {
-    const approval = {
-      id: 'apr_1',
-      agentId: 'ag_1',
-      toolName: 'Bash',
-      status: 'pending',
-      input: { command: 'ls' },
-    } as unknown as Approval;
-    const message = approvalMessage(deps(), approval);
-    expect(message?.actions?.map((a) => a.id)).toEqual(['apr:apr_1:allow', 'apr:apr_1:deny']);
+  it('neutralise le balisage présent dans le contenu, dialecte par dialecte', () => {
+    const reply = runEndMessage(deps(), run({ resultText: 'vu <b>ici</b> & là' }));
+    expect(renderHtml(reply)).toContain('&lt;b&gt;');
+    expect(renderMrkdwn(reply)).toContain('&lt;b&gt;');
   });
 
-  it('ne renotifie pas une approbation déjà résolue', () => {
-    const approval = { id: 'apr_1', status: 'allowed' } as unknown as Approval;
-    expect(approvalMessage(deps(), approval)).toBeNull();
+  it('n’affiche les tentatives que lorsqu’il y en a eu plusieurs', () => {
+    expect(renderPlain(runEndMessage(deps(), run()))).not.toContain('Tentatives');
+    const relance = run({ attemptCount: 3, accountName: 'secours' });
+    const text = renderPlain(runEndMessage(deps(), relance));
+    expect(text).toContain('Tentatives : 3');
+    expect(text).toContain('secours');
+  });
+
+  it('porte l’identifiant de l’approbation, pour les boutons', () => {
+    const reply = approvalMessage(deps(), approval());
+    expect(reply?.approvalIds).toEqual(['ap_1']);
+  });
+
+  it('rend null pour une approbation déjà tranchée', () => {
+    expect(approvalMessage(deps(), approval({ status: 'allowed' }))).toBeNull();
   });
 });
 
-describe('commandes', () => {
-  it('reconnaît les commandes connues, quelle que soit la casse', () => {
-    expect(parseCommand('/Status')?.name).toBe('status');
-    expect(parseCommand('/run Comptabilité fais ceci')?.rest).toBe('Comptabilité fais ceci');
-  });
-
-  it('ignore la conversation ordinaire', () => {
-    // Répondre « commande inconnue » à chaque phrase rendrait le canal inutilisable.
-    expect(parseCommand('bonjour')).toBeNull();
-    expect(parseCommand('/inconnue')).toBeNull();
-  });
-
-  it('lance un run et rend son identifiant', () => {
-    const messages = runCommand(deps(), { name: 'run', rest: 'Comptabilité analyse ceci' });
-    expect(messages[0]?.tone).toBe('ok');
-    expect(messages[0]?.fields?.[0]?.value).toBe('run_new');
-  });
-
-  it('refuse un agent inconnu en listant les disponibles', () => {
-    const messages = runCommand(deps(), { name: 'run', rest: 'Fantôme fais ceci' });
-    expect(messages[0]?.tone).toBe('warn');
-    expect(messages[0]?.fields?.[0]?.value).toContain('Comptabilité');
-  });
-
-  it('rappelle l’usage quand le prompt manque', () => {
-    expect(runCommand(deps(), { name: 'run', rest: 'Comptabilité' })[0]?.title).toContain('Usage');
-  });
-
-  it('décode une action d’approbation, et rejette le reste', () => {
-    expect(parseApprovalAction('apr:apr_1:allow')).toEqual({
-      approvalId: 'apr_1',
+describe('identifiant d’action d’approbation', () => {
+  it('décode une décision valide', () => {
+    expect(parseApprovalAction('apr:ap_1:allow')).toEqual({
+      approvalId: 'ap_1',
       decision: 'allow',
     });
-    expect(parseApprovalAction('apr:apr_1:peut-etre')).toBeNull();
-    expect(parseApprovalAction('autre:chose')).toBeNull();
+  });
+
+  it('refuse ce qui n’en est pas', () => {
+    expect(parseApprovalAction('autre:ap_1:allow')).toBeNull();
+    expect(parseApprovalAction('apr:ap_1:peut-être')).toBeNull();
+    expect(parseApprovalAction('')).toBeNull();
   });
 });
 
-describe('rendu par canal', () => {
-  const message: ChannelMessage = {
-    title: 'Approbation demandée',
-    tone: 'warn',
-    fields: [{ label: 'Outil', value: 'Bash' }],
-    body: 'a < b & c',
-    actions: [{ id: 'apr:1:allow', label: 'Autoriser' }],
+/* Un canal sortant ne peut pas rendre une approbation cliquable. Ne rien dire
+   serait le pire résultat : une décision annoncée sans lieu où la prendre. */
+describe('canal non interactif', () => {
+  it('ajoute où trancher quand le message porte une approbation', () => {
+    const reply = approvalMessage(deps(), approval())!;
+    expect(renderPlain(withResolutionHint(reply))).toContain('interface Maestro');
+  });
+
+  it('n’ajoute rien à un message sans approbation', () => {
+    const reply = runEndMessage(deps(), run());
+    expect(withResolutionHint(reply)).toBe(reply);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Diffusion
+// ---------------------------------------------------------------------------
+
+function fakeChannel(id: string, overrides: Partial<Channel> = {}): Channel {
+  return {
+    id,
+    label: id,
+    enabled: true,
+    interactive: false,
+    start: vi.fn(),
+    stop: vi.fn(),
+    send: vi.fn(async () => {}),
+    ...overrides,
   };
-
-  it('Telegram échappe le HTML et laisse les actions aux boutons', () => {
-    const out = render(message);
-    expect(out).toContain('&lt; b &amp;');
-    // Répéter les actions en texte ferait doublon avec les boutons.
-    expect(out).not.toContain('Autoriser');
-  });
-
-  it('le texte brut rappelle les actions, faute de pouvoir les rendre', () => {
-    // Une approbation qui attend sans qu'on sache où la résoudre est pire
-    // qu'une notification absente.
-    const out = renderPlainText(message);
-    expect(out).toContain('Autoriser');
-    expect(out).toContain('Maestro');
-  });
-
-  it('le texte brut peut taire le corps du message', () => {
-    expect(renderPlainText(message, false)).not.toContain('a < b');
-  });
-
-  it('adapte la charge utile au service destinataire', () => {
-    expect(buildPayload('slack', 'x')).toEqual({ text: 'x' });
-    expect(buildPayload('discord', 'x')).toEqual({ content: 'x' });
-  });
-});
-
-describe('configuration du webhook', () => {
-  it('n’exporte pas le corps des messages par défaut', () => {
-    /* Envoyer, c'est publier : le résultat d'un run peut porter du code ou des
-       noms de clients, et ne doit pas partir vers un service tiers sans que
-       quelqu'un l'ait demandé. */
-    expect(webhookConfigFromEnv({ MAESTRO_WEBHOOK_URL: 'https://x/y' }).detail).toBe('status');
-  });
-
-  it('accepte le détail complet quand il est demandé explicitement', () => {
-    const config = webhookConfigFromEnv({
-      MAESTRO_WEBHOOK_URL: 'https://x/y',
-      MAESTRO_WEBHOOK_DETAIL: 'full',
-    });
-    expect(config.detail).toBe('full');
-  });
-
-  it('ignore une URL qui n’en est pas une, et reste désactivé', () => {
-    expect(webhookConfigFromEnv({ MAESTRO_WEBHOOK_URL: 'pas-une-url' }).urls).toEqual([]);
-  });
-
-  it('retombe sur le format brut devant une valeur inconnue', () => {
-    expect(webhookConfigFromEnv({ MAESTRO_WEBHOOK_FORMAT: 'mattermost' }).format).toBe('raw');
-  });
-});
+}
 
 describe('registre', () => {
-  function fakeChannel(id: string, options: { fails?: boolean; enabled?: boolean } = {}): Channel {
-    return {
-      id,
-      label: id,
-      enabled: options.enabled ?? true,
-      interactive: false,
-      start: vi.fn(),
-      stop: vi.fn(),
-      send: options.fails
-        ? vi.fn(async () => {
-            throw new Error('service injoignable');
-          })
-        : vi.fn(async () => undefined),
-    };
+  function bus(): Bus {
+    return { log: vi.fn(), subscribe: vi.fn() } as unknown as Bus;
   }
 
-  const bus = { log: vi.fn(), subscribe: vi.fn() } as unknown as Bus;
-
-  it('diffuse à tous les canaux actifs', async () => {
-    const a = fakeChannel('a');
-    const b = fakeChannel('b');
-    const registry = new ChannelRegistry([a, b], bus, deps());
-    await registry.broadcast({ title: 'x', tone: 'info' });
-    expect(a.send).toHaveBeenCalledOnce();
-    expect(b.send).toHaveBeenCalledOnce();
-  });
-
-  it('un canal en panne n’empêche pas les autres de recevoir', async () => {
-    // C'est exactement ce qu'un Promise.all sans garde aurait cassé.
-    const cassé = fakeChannel('cassé', { fails: true });
-    const bon = fakeChannel('bon');
-    const registry = new ChannelRegistry([cassé, bon], bus, deps());
-    await expect(registry.broadcast({ title: 'x', tone: 'info' })).resolves.toBeUndefined();
-    expect(bon.send).toHaveBeenCalledOnce();
-  });
-
-  it('écarte les canaux désactivés', () => {
+  it('écarte les canaux désactivés au lieu de les tester à chaque envoi', () => {
     const registry = new ChannelRegistry(
-      [fakeChannel('a', { enabled: false }), fakeChannel('b')],
-      bus,
+      [fakeChannel('a'), fakeChannel('b', { enabled: false })],
+      bus(),
       deps(),
     );
-    expect(registry.list().map((c) => c.id)).toEqual(['b']);
-    expect(registry.enabled).toBe(true);
+    expect(registry.list().map((c) => c.id)).toEqual(['a']);
   });
 
-  it('signale qu’aucun canal ne sait résoudre une approbation', () => {
-    const registry = new ChannelRegistry([fakeChannel('a')], bus, deps());
-    expect(registry.hasInteractive).toBe(false);
+  /* Un webhook injoignable ne doit pas empêcher la notification Telegram de
+     partir — ce qui arriverait avec un `Promise.all` sans garde. */
+  it('isole les échecs : un canal en panne n’empêche pas les autres', async () => {
+    const casse = fakeChannel('casse', {
+      send: vi.fn(async () => {
+        throw new Error('injoignable');
+      }),
+    });
+    const sain = fakeChannel('sain');
+    const b = bus();
+    const registry = new ChannelRegistry([casse, sain], b, deps());
+
+    await registry.broadcast({ lines: [{ spans: [{ text: 'coucou' }] }] });
+
+    expect(sain.send).toHaveBeenCalled();
+    expect(b.log).toHaveBeenCalledWith('warn', 'channels', expect.stringContaining('casse'));
   });
 
-  it('n’envoie rien quand aucun webhook n’est configuré', async () => {
-    const channel = new WebhookChannel({ urls: [], format: 'raw', detail: 'status' }, bus);
+  it('signale si un canal sait trancher une approbation', () => {
+    expect(new ChannelRegistry([fakeChannel('a')], bus(), deps()).hasInteractive).toBe(false);
+    expect(
+      new ChannelRegistry([fakeChannel('a', { interactive: true })], bus(), deps()).hasInteractive,
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 🔒 Webhook : envoyer, c'est publier
+// ---------------------------------------------------------------------------
+
+describe('webhook sortant', () => {
+  const reply: ChatReply = {
+    lines: [
+      { spans: [{ text: 'Run terminé' }] },
+      { spans: [{ text: 'du code confidentiel' }], detail: true },
+    ],
+  };
+
+  it('n’envoie que l’état par défaut', () => {
+    const text = renderPlain(stripDetail(reply, 'status'));
+    expect(text).toContain('Run terminé');
+    expect(text).not.toContain('confidentiel');
+  });
+
+  it('n’ajoute le contenu que sur choix explicite', () => {
+    expect(renderPlain(stripDetail(reply, 'full'))).toContain('confidentiel');
+  });
+
+  it('parle le dialecte du service destinataire', () => {
+    expect(buildPayload('slack', 'x')).toEqual({ text: 'x' });
+    expect(buildPayload('discord', 'x')).toEqual({ content: 'x' });
+    expect(buildPayload('raw', 'x')).toEqual({ text: 'x', message: 'x' });
+  });
+
+  it('reste désactivé sans configuration, et n’impose rien au démarrage', () => {
+    const channel = new WebhookChannel(webhookConfigFromEnv({}), {
+      log: vi.fn(),
+    } as unknown as Bus);
     expect(channel.enabled).toBe(false);
-    await expect(channel.send({ title: 'x', tone: 'info' })).resolves.toBeUndefined();
+  });
+
+  /* Défaut prudent délibéré : `full` doit être écrit, pas deviné. */
+  it('exige « full » écrit en clair pour exporter le travail', () => {
+    expect(webhookConfigFromEnv({ MAESTRO_WEBHOOK_DETAIL: 'oui' }).detail).toBe('status');
+    expect(webhookConfigFromEnv({ MAESTRO_WEBHOOK_DETAIL: 'full' }).detail).toBe('full');
+  });
+
+  it('ignore une URL qui n’en est pas', () => {
+    expect(webhookConfigFromEnv({ MAESTRO_WEBHOOK_URL: 'pas-une-url' }).urls).toEqual([]);
   });
 });

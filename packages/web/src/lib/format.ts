@@ -56,6 +56,14 @@ export function fmtCost(usd: number): string {
   return `$${usd.toFixed(usd >= 1 ? 2 : 4)}`;
 }
 
+/** Taille de fichier, en unités binaires — celles que rapporte le système. */
+export function fmtBytes(bytes: number): string {
+  if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Ko`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} Mo`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} Go`;
+}
+
 export const RUN_STATUS_LABELS: Record<string, string> = {
   queued: 'En file',
   running: 'En cours',

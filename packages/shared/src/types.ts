@@ -85,6 +85,11 @@ export interface AgentConfig {
   timeoutSec: number | null;
   /** Budget de tokens (entrée+sortie) par run ; le run est interrompu au-delà. */
   tokenBudget: number | null;
+  /**
+   * Bac à sable d'exécution. `null` = aucun confinement, le comportement par
+   * défaut et historique. Voir {@link AgentSandbox}.
+   */
+  sandbox: AgentSandbox | null;
   /** Couleur hexadécimale du nœud dans le graphe Mission Control. */
   color: string;
   /** Position épinglée dans le graphe (null = libre, pilotée par la simulation). */
@@ -97,6 +102,44 @@ export interface AgentConfig {
 export type AgentCreate = Omit<AgentConfig, 'id' | 'workspaceDir' | 'createdAt' | 'updatedAt'> & {
   workspaceDir?: string | null;
 };
+
+/**
+ * Confinement d'un agent, par agent et jamais imposé.
+ *
+ * Le bac à sable est celui de Claude Code lui-même : isolation du système de
+ * fichiers, filtrage de l'egress réseau et seccomp, appliqués aux commandes que
+ * l'agent lance. C'est un cran plus fin qu'un conteneur — il distingue lecture
+ * et écriture par chemin, et laisse la session parler à l'API pendant que les
+ * commandes, elles, restent enfermées. Un conteneur, quand on en veut un
+ * malgré tout, enveloppe l'instance entière (voir le Dockerfile).
+ *
+ * `enabled: false` ou `sandbox: null` : Maestro se comporte exactement comme
+ * avant. Le confinement est une décision par agent, prise pour un agent dont on
+ * n'est pas sûr — pas un péage que tous les autres paient.
+ */
+export interface AgentSandbox {
+  enabled: boolean;
+  /**
+   * Refuser de démarrer si le bac à sable est indisponible.
+   *
+   * Faux par défaut, comme le SDK : sur une plateforme non gérée, l'agent
+   * tourne alors sans confinement avec un avertissement. Le passer à vrai fait
+   * du confinement une condition d'exécution — le bon choix pour un agent
+   * précisément jugé risqué, où « dégradé en silence » est le pire des cas.
+   */
+  failIfUnavailable: boolean;
+  /**
+   * Domaines joignables par les commandes. Vide = aucune sortie réseau.
+   * Accepte les jokers de Claude Code (`*.exemple.fr`).
+   */
+  allowedDomains: string[];
+  /** Refuser tout hôte hors liste au lieu de demander une approbation. */
+  strictAllowlist: boolean;
+  /** Chemins ouverts en écriture en plus du workspace de l'agent. */
+  allowWrite: string[];
+  /** Chemins interdits en lecture, en plus des protections systématiques. */
+  denyRead: string[];
+}
 
 /** Gabarits d'agents proposés à la création. */
 export interface AgentTemplate {
@@ -128,9 +171,13 @@ export type RunOrigin =
   | 'routine'
   | 'kanban'
   | 'telegram'
+  | 'discord'
+  | 'slack'
   | 'pipeline'
   | 'agent'
   | 'external'
+  /** Échantillon d'un lot de génération de données d'entraînement. */
+  | 'training'
   /**
    * Délibération déclenchée par le battement de cœur.
    *
@@ -140,6 +187,9 @@ export type RunOrigin =
    * couper sans couper les routines.
    */
   | 'heartbeat';
+
+/** Origines conversationnelles : celles dont on notifie la fin dans le canal. */
+export const CHAT_ORIGINS: readonly RunOrigin[] = ['telegram', 'discord', 'slack'];
 
 export type RunStatus =
   'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled' | 'timeout';
@@ -254,6 +304,22 @@ export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired';
  */
 export type ApprovalResolver = 'web' | 'telegram' | 'slack' | 'policy' | 'timeout';
 
+/**
+ * Jeton d'acces nomme.
+ *
+ * 🔒 La valeur n'est jamais renvoyee : seule son empreinte est en base, et le
+ * jeton n'est montre qu'une fois, a la creation. `preview` sert a le reconnaitre
+ * dans une liste sans le divulguer.
+ */
+export interface AccessToken {
+  id: string;
+  label: string;
+  preview: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+}
+
 export interface Approval {
   id: string;
   runId: string;
@@ -263,6 +329,14 @@ export interface Approval {
   input: unknown;
   status: ApprovalStatus;
   resolvedBy: ApprovalResolver | null;
+  /**
+   * Nom du jeton qui a tranche.
+   *
+   * « web » disait par ou, jamais par qui — or c'est exactement ce qu'un
+   * human-in-the-loop doit garantir. Nul pour une resolution automatique
+   * (politique, expiration) et pour les approbations anterieures.
+   */
+  resolvedByLabel: string | null;
   note: string | null;
   requestedAt: string;
   resolvedAt: string | null;
@@ -685,8 +759,13 @@ export interface LogLine {
 export interface Settings {
   /** Nom d'instance affiché dans l'UI. */
   instanceName: string;
-  /** Notifications Telegram pour toutes les fins de run (pas seulement origin telegram). */
-  telegramNotifyAllRuns: boolean;
+  /**
+   * Notifier la fin de tous les runs sur les canaux de messagerie, et pas
+   * seulement ceux qui en viennent. Le réglage s'appelait
+   * `telegramNotifyAllRuns` quand Telegram était le seul canal ; l'ancienne clé
+   * est reprise à la lecture, personne ne perd son choix.
+   */
+  notifyAllRuns: boolean;
   /** Délai (s) avant expiration automatique d'une approbation en attente. */
   approvalTimeoutSec: number;
   /** Nombre max de runs simultanés toutes files confondues. */
@@ -698,6 +777,26 @@ export interface Settings {
    * `null` = environnement ambiant du serveur, sans repli.
    */
   defaultResiliencePolicyId: string | null;
+  /**
+   * Capture intégrale des retours d'outils et de la réflexion.
+   *
+   * Par défaut, un retour d'outil est raccourci à la capture : c'est un
+   * transcript qu'on lit à l'écran, pas une archive. Pour produire des données
+   * d'entraînement, ce raccourcissement est nuisible — un modèle entraîné sur
+   * des observations coupées apprend à s'arrêter au milieu d'un résultat. Le
+   * réglage lève la limite au prix d'une base plus volumineuse.
+   */
+  fullTrajectoryCapture: boolean;
+  /**
+   * Rétention des événements de runs et du journal, en jours.
+   *
+   * `null` ou 0 = conservation illimitée, le comportement historique. Rien ne
+   * purgeait ces deux tables, ce qui restait indolore sur quelques dizaines de
+   * runs — mais un lot d'entraînement de mille échantillons avec capture
+   * intégrale écrit des centaines de mégaoctets, et la base ne rend jamais
+   * l'espace d'elle-même.
+   */
+  retentionDays: number | null;
 }
 
 export interface ServerInfo {
@@ -816,6 +915,38 @@ export interface McpServerDef {
 
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Serveur MCP prêt à déclarer, issu du catalogue livré.
+ *
+ * Un raccourci, pas une dépendance : ces serveurs se déclarent aussi à la main.
+ * Le catalogue dispense seulement de connaître le nom de paquet, les arguments
+ * et les variables d'environnement de chacun.
+ */
+export type McpPresetCategory =
+  'navigateur' | 'web' | 'fichiers' | 'raisonnement' | 'développement';
+
+export interface McpPresetEnvKey {
+  key: string;
+  /** À quoi sert la variable, et où l'obtenir. */
+  hint: string;
+  required: boolean;
+}
+
+export interface McpPreset {
+  slug: string;
+  name: string;
+  description: string;
+  category: McpPresetCategory;
+  /** Runtime attendu sur la machine — un runtime absent fait échouer le serveur. */
+  runtime: 'npx' | 'uvx';
+  command: string;
+  args: string[];
+  envKeys: McpPresetEnvKey[];
+  /** Ce que le serveur donne à l'agent, en une phrase. */
+  grants: string;
+  homepage: string;
 }
 
 /** Résultat d'un essai d'outil depuis l'interface, avant de l'ouvrir aux agents. */
@@ -1046,4 +1177,310 @@ export interface CommitResult {
   branch: string;
   sha: string;
   files: number;
+}
+
+// ---------------------------------------------------------------------------
+// Données d'entraînement (MLOps)
+// ---------------------------------------------------------------------------
+
+/**
+ * Un tour de trajectoire : ce qu'un modèle doit apprendre à produire.
+ *
+ * Volontairement plus pauvre que le format d'un fournisseur : c'est la forme
+ * canonique interne, dont dérivent tous les exports. Elle ne connaît ni
+ * ShareGPT ni OpenAI — chaque export sait la lire, elle n'en connaît aucun.
+ */
+export type TrajectoryRole = 'system' | 'user' | 'assistant' | 'tool';
+
+export interface TrajectoryToolCall {
+  /** Identifiant du bloc `tool_use`, seul lien fiable vers son résultat. */
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+
+export interface TrajectoryTurn {
+  role: TrajectoryRole;
+  /** Texte du tour. Vide sur un tour assistant purement outil. */
+  content: string;
+  /** Contenu de réflexion, séparé du texte : la plupart des formats l'excluent. */
+  thinking?: string;
+  /** role = assistant. */
+  toolCalls?: TrajectoryToolCall[];
+  /** role = tool. */
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
+  /**
+   * Vrai si le contenu a été raccourci — à la capture ou à la compression.
+   * Un export silencieusement tronqué produit des données d'entraînement
+   * fausses : le modèle apprendrait à s'arrêter au milieu d'un résultat.
+   */
+  truncated?: boolean;
+}
+
+/** Trajectoire complète d'un run, prête à exporter. */
+export interface Trajectory {
+  runId: string;
+  agentId: string;
+  agentName: string;
+  model: string;
+  status: RunStatus;
+  turns: TrajectoryTurn[];
+  /** Outils réellement appelés, dans l'ordre de première apparition. */
+  toolsUsed: string[];
+  /** Estimation du poids en tokens de la trajectoire rendue. */
+  estimatedTokens: number;
+  usage: TokenUsage;
+  costUsd: number;
+  durationMs: number | null;
+  createdAt: string;
+}
+
+/** Compte rendu d'une compression : ce qui a été sacrifié, et pourquoi. */
+export interface TrajectoryCompression {
+  applied: boolean;
+  /**
+   * Faux quand la compression n'a pas suffi à tenir le budget.
+   *
+   * Le budget est un objectif, pas une garantie : une trajectoire faite d'un
+   * seul tour très long ne peut pas rétrécir davantage sans perdre la paire
+   * consigne/réponse qui fait tout son intérêt. Le taire laisserait croire à un
+   * corpus calibré qui ne l'est pas.
+   */
+  withinBudget: boolean;
+  tokenBudget: number | null;
+  tokensBefore: number;
+  tokensAfter: number;
+  droppedThinkingTurns: number;
+  truncatedToolResults: number;
+  droppedTurns: number;
+}
+
+/**
+ * Format d'export.
+ *
+ * `sharegpt` : le format de fine-tuning le plus largement accepté (Axolotl,
+ * LLaMA-Factory, Unsloth). `openai` : messages + tool_calls natifs, pour un
+ * fine-tuning d'API. `atropos` : rollouts scorés pour l'apprentissage par
+ * renforcement. `raw` : la forme canonique, sans perte, pour outiller soi-même.
+ */
+export type TrainingExportFormat = 'sharegpt' | 'openai' | 'atropos' | 'raw';
+
+/** Nom d'un parseur d'appels d'outils — voir training-parsers.ts. */
+export type ToolCallDialect =
+  | 'hermes'
+  | 'openai'
+  | 'mistral'
+  | 'llama3_json'
+  | 'llama3_python_tag'
+  | 'pythonic'
+  | 'deepseek'
+  | 'command_r'
+  | 'granite'
+  | 'functionary'
+  | 'json_lines';
+
+export interface ToolCallDialectInfo {
+  id: ToolCallDialect;
+  label: string;
+  /** Familles de modèles qui attendent cette convention. */
+  families: string;
+  /** Exemple rendu, pour que l'UI montre ce qui sera écrit. */
+  sample: string;
+}
+
+export interface TrainingExportRequest {
+  format: TrainingExportFormat;
+  dialect?: ToolCallDialect;
+  /** Restreint aux runs d'un lot. Exclusif avec `runIds`. */
+  batchId?: string | null;
+  runIds?: string[];
+  /** Budget de tokens par trajectoire ; au-delà, compression. */
+  tokenBudget?: number | null;
+  /** Exclut les runs en échec — vrai par défaut. */
+  onlySucceeded?: boolean;
+  includeThinking?: boolean;
+  /** N'exporte que les trajectoires ayant appelé au moins un outil. */
+  requireToolCalls?: boolean;
+}
+
+/** Aperçu d'un export : de quoi décider avant d'écrire un fichier. */
+export interface TrainingExportPreview {
+  format: TrainingExportFormat;
+  dialect: ToolCallDialect;
+  /** Trajectoires retenues. */
+  count: number;
+  /** Trajectoires écartées, par motif. */
+  skipped: Array<{ runId: string; reason: string }>;
+  totalEstimatedTokens: number;
+  compression: TrajectoryCompression;
+  /** Les deux premières lignes du JSONL, telles qu'elles seront écrites. */
+  sample: string[];
+}
+
+// -- Lots de génération -----------------------------------------------------
+
+export type TrainingBatchStatus =
+  | 'draft'
+  | 'running'
+  | 'paused'
+  | 'succeeded'
+  /**
+   * Terminé, mais avec des échecs.
+   *
+   * Un lot de mille échantillons dont trente-sept ont échoué n'est ni un succès
+   * ni un échec : marqué « succeeded » il mentait, marqué « failed » il aurait
+   * fait jeter neuf cent soixante-trois trajectoires exploitables.
+   */
+  | 'partial'
+  | 'failed'
+  | 'cancelled';
+
+export type TrainingItemStatus =
+  'pending' | 'running' | 'succeeded' | 'failed' | 'skipped' | 'cancelled';
+
+/**
+ * Pondération d'un outil dans un lot.
+ *
+ * Le poids ne force rien — un modèle reste libre de ses appels. Il pilote la
+ * consigne injectée dans le prompt et le tirage des variantes, ce qui suffit à
+ * déséquilibrer volontairement un jeu de données (par ex. 70 % de lectures,
+ * 30 % d'écritures).
+ */
+export interface ToolWeight {
+  tool: string;
+  weight: number;
+}
+
+export interface TrainingBatchSpec {
+  /**
+   * Agents qui exécutent le lot.
+   *
+   * Plusieurs, et non un seul, parce qu'un agent n'exécute jamais deux runs à
+   * la fois : son workspace est unique. Le parallélisme réel d'un lot vaut donc
+   * min(workers, agents du pool).
+   */
+  agentIds: string[];
+  /** Gabarits de prompt. `{{var}}` est substitué depuis `variables`. */
+  promptTemplates: string[];
+  /** Jeux de valeurs tirés pour peupler les gabarits. */
+  variables: Record<string, string[]>;
+  /** Nombre d'échantillons à produire. */
+  samples: number;
+  /** Générations menées de front, bornée par la taille du pool d'agents. */
+  workers: number;
+  /** Tentatives par échantillon avant abandon. */
+  maxAttempts: number;
+  toolWeights: ToolWeight[];
+  /** Délai maximal par échantillon, en secondes. */
+  timeoutSec: number | null;
+  /** Skill jointe à chaque run du lot. */
+  skillId: string | null;
+  /**
+   * Notation automatique des trajectoires (récompense pour l'apprentissage
+   * par renforcement). Sans elle, un export Atropos n'a pas de score.
+   */
+  grader: TrainingGraderSpec | null;
+}
+
+export interface TrainingGraderSpec {
+  agentId: string;
+  /**
+   * Consigne du juge. `{{prompt}}` et `{{result}}` sont substitués. Le juge
+   * doit terminer sa réponse par un nombre entre 0 et 1.
+   */
+  promptTemplate: string;
+}
+
+export interface TrainingBatch {
+  id: string;
+  name: string;
+  description: string;
+  status: TrainingBatchStatus;
+  spec: TrainingBatchSpec;
+  /** Compteurs dérivés des items, calculés à la lecture. */
+  counts: Record<TrainingItemStatus, number>;
+  /** Nombre d'échantillons déjà engendrés — le point de reprise. */
+  checkpointIndex: number;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+export interface TrainingItem {
+  id: string;
+  batchId: string;
+  index: number;
+  agentId: string;
+  prompt: string;
+  runId: string | null;
+  status: TrainingItemStatus;
+  attempts: number;
+  /** Récompense dans [0,1] — juge automatique ou notation humaine. */
+  score: number | null;
+  scoreSource: 'grader' | 'human' | null;
+  toolCallCount: number;
+  /**
+   * Entrée + sortie, **hors tokens de cache**.
+   *
+   * La distinction se voit sur un banc de non-régression : deux exécutions du
+   * même prompt affichent le même nombre de tokens pour des coûts très
+   * différents — la première paie l'écriture du cache, la seconde le relit. Le
+   * coût est donc la référence économique ; ce compteur mesure le volume produit,
+   * pas la facture.
+   */
+  totalTokens: number;
+  costUsd: number;
+  error: string | null;
+  createdAt: string;
+  endedAt: string | null;
+}
+
+/**
+ * Banc de non-regression : ce que rend la comparaison de deux lots.
+ *
+ * Le verdict est une phrase, pas un score : un banc dont il faut interpreter
+ * soi-meme les chiffres ne sert a rien — il doit dire s'il faut garder le
+ * changement.
+ */
+export interface ComparisonSide {
+  status: TrainingItemStatus;
+  score: number | null;
+  toolCallCount: number;
+  totalTokens: number;
+  costUsd: number;
+  runId: string | null;
+}
+
+export type CaseVerdict = 'amélioré' | 'dégradé' | 'stable' | 'incomparable';
+
+export interface CaseComparison {
+  index: number;
+  prompt: string;
+  baseline: ComparisonSide | null;
+  candidate: ComparisonSide | null;
+  scoreDelta: number | null;
+  verdict: CaseVerdict;
+}
+
+export interface BatchComparison {
+  comparable: boolean;
+  reason: string | null;
+  cases: CaseComparison[];
+  summary: {
+    improved: number;
+    regressed: number;
+    unchanged: number;
+    incomparable: number;
+    baselineMean: number | null;
+    candidateMean: number | null;
+    meanDelta: number | null;
+    costDelta: number;
+    tokenDelta: number;
+  };
+  /** Phrase de synthese, ajoutee par l'API. */
+  verdict: string;
 }

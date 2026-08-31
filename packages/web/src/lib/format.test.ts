@@ -1,4 +1,26 @@
 import { describe, expect, it } from 'vitest';
+import { fmtBytes } from './format';
+
+describe('fmtBytes', () => {
+  it('choisit l’unité lisible', () => {
+    expect(fmtBytes(512)).toBe('512 o');
+    expect(fmtBytes(2048)).toBe('2.0 Ko');
+    expect(fmtBytes(5 * 1024 * 1024)).toBe('5.0 Mo');
+    expect(fmtBytes(3 * 1024 * 1024 * 1024)).toBe('3.00 Go');
+  });
+
+  /* La taille d'une base est un entier d'octets : afficher « 512.4 o » pour un
+     arrondi flottant ferait douter du chiffre. */
+  it('arrondit sous le kilo-octet', () => {
+    expect(fmtBytes(512.4)).toBe('512 o');
+    expect(fmtBytes(0)).toBe('0 o');
+  });
+
+  it('ne rend jamais de taille négative', () => {
+    expect(fmtBytes(-5)).toBe('0 o');
+  });
+});
+
 import { fmtDateTime, fmtDuration, fmtTime } from './format';
 
 describe('valeur absente', () => {

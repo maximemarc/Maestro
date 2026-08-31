@@ -4,9 +4,9 @@
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import type { Settings, TmuxSessionInfo } from '@maestro/shared';
-import { api } from '../lib/api';
-import { fmtDateTime } from '../lib/format';
+import type { AccessToken, Settings, TmuxSessionInfo } from '@maestro/shared';
+import { api, type MaintenanceState } from '../lib/api';
+import { fmtBytes, fmtDateTime } from '../lib/format';
 import { useStore } from '../lib/store';
 import { Desktop, PuzzlePiece } from '@phosphor-icons/react';
 import {
@@ -15,7 +15,7 @@ import {
   requestApprovalNotifications,
   setNotifyApprovals,
 } from '../lib/prefs';
-import { ConfirmButton, EmptyState, Field, LoadingBlock } from '../components/ui';
+import { ConfirmButton, EmptyState, ErrorText, Field, LoadingBlock } from '../components/ui';
 
 export default function SettingsPage() {
   const server = useStore((s) => s.server);
@@ -232,16 +232,29 @@ export default function SettingsPage() {
               <label className="checkbox-row mb-3">
                 <input
                   type="checkbox"
-                  checked={settings.telegramNotifyAllRuns}
+                  checked={settings.notifyAllRuns}
+                  onChange={(e) => setSettings({ ...settings, notifyAllRuns: e.target.checked })}
+                />
+                Notifier chaque fin de run sur les canaux de messagerie
+              </label>
+
+              <label className="checkbox-row mb-2">
+                <input
+                  type="checkbox"
+                  checked={settings.fullTrajectoryCapture}
                   onChange={(e) =>
-                    setSettings({ ...settings, telegramNotifyAllRuns: e.target.checked })
+                    setSettings({ ...settings, fullTrajectoryCapture: e.target.checked })
                   }
                 />
-                {/* Le réglage porte sur tous les canaux configurés, pas seulement
-                    Telegram ; la clé garde son nom pour ne pas casser les
-                    instances déjà enregistrées. */}
-                Notifier chaque fin de run sur les canaux configurés
+                Capture intégrale des retours d'outils
               </label>
+              <p className="text-faint text-xs mb-3">
+                Par défaut, un retour d'outil est raccourci à 1 500 caractères : le transcript est
+                fait pour être lu. Pour produire des données d'entraînement, ce raccourci devient
+                une erreur d'étiquetage — le modèle apprend à s'arrêter au milieu d'un résultat. Le
+                réglage porte la limite à 60 000 caractères, au prix d'une base plus volumineuse, et
+                ne s'applique qu'aux runs suivants.
+              </p>
 
               <label className="checkbox-row mb-2">
                 <input
@@ -256,12 +269,36 @@ export default function SettingsPage() {
                 que ce navigateur, et n'est pas transmise au serveur.
                 {notifyDenied && ' Le navigateur a refusé les notifications pour ce site.'}
               </p>
+              <Field
+                label="Rétention des transcripts (jours)"
+                hint="Vide = illimité. Les événements des runs terminés et le journal sont purgés au-delà ; un run en cours n'est jamais amputé."
+              >
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={3650}
+                  value={settings.retentionDays ?? ''}
+                  onChange={(e) =>
+                    setSettings({
+                      ...settings,
+                      retentionDays: e.target.value ? Number(e.target.value) : null,
+                    })
+                  }
+                  placeholder="illimité"
+                />
+              </Field>
+
               <div className="row">
                 <button className="btn primary" onClick={saveSettings} disabled={saving}>
                   {saving ? 'Enregistrement…' : 'Enregistrer'}
                 </button>
                 {saved && <span className="text-ok">Paramètres enregistrés.</span>}
               </div>
+
+              <MaintenancePanel />
+
+              <AccessTokensPanel />
             </>
           )}
         </div>
@@ -383,6 +420,218 @@ export default function SettingsPage() {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Entretien de la base.
+ *
+ * Sa place est ici, juste sous la rétention : le réglage se prend sur un chiffre
+ * — la taille réelle de la base — et non dans le vide. Purger était jusqu'ici
+ * impossible, et sauvegarder se faisait à la main.
+ */
+function MaintenancePanel() {
+  const notify = useStore((s) => s.notify);
+  const [state, setState] = useState<MaintenanceState | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(() => {
+    api
+      .getMaintenance()
+      .then(setState)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(load, [load]);
+
+  const act = async (what: 'backup' | 'prune') => {
+    setBusy(true);
+    setError(null);
+    try {
+      if (what === 'backup') {
+        const report = await api.runBackup();
+        notify(`Sauvegarde écrite (${fmtBytes(report.bytes)}).`);
+      } else {
+        const report = await api.runPrune();
+        notify(
+          report.applied
+            ? `${report.deletedEvents} événement(s) purgé(s), ${fmtBytes(report.bytesBefore - report.bytesAfter)} rendus.`
+            : 'Aucune rétention configurée : rien n’a été purgé.',
+        );
+      }
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mt-4">
+      <div className="section-label">Entretien</div>
+      {error && <ErrorText>{error}</ErrorText>}
+
+      <dl className="kv">
+        <dt>Taille de la base</dt>
+        <dd>{state ? fmtBytes(state.databaseBytes) : '…'}</dd>
+        <dt>Rétention en vigueur</dt>
+        <dd>{state?.retentionDays ? `${state.retentionDays} jours` : 'illimitée'}</dd>
+        <dt>Sauvegardes</dt>
+        <dd>
+          {state?.backups.length
+            ? `${state.backups.length} — la plus récente le ${fmtDateTime(state.backups[0]?.createdAt ?? null)}`
+            : 'aucune'}
+        </dd>
+      </dl>
+
+      <div className="row gap-2 mt-2">
+        <button className="btn" onClick={() => void act('backup')} disabled={busy}>
+          Sauvegarder maintenant
+        </button>
+        <button className="btn ghost" onClick={() => void act('prune')} disabled={busy}>
+          Purger selon la rétention
+        </button>
+      </div>
+      <p className="text-faint text-xs mt-2">
+        La sauvegarde est écrite dans <code>&lt;données&gt;/backups</code>, à chaud, et les sept
+        plus récentes sont conservées. 🔒 Elle contient tout — transcripts, approbations,
+        configuration des serveurs MCP et leurs clés : elle mérite les mêmes précautions que la base
+        elle-même.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Jetons d'accès nommés.
+ *
+ * Un seul jeton partagé rendait toute action inattribuable — une approbation
+ * était enregistrée « web », sans dire qui, alors que l'attribution est
+ * précisément ce qu'un human-in-the-loop doit garantir. Révoquer l'accès d'une
+ * personne obligeait par ailleurs à changer le jeton de tout le monde.
+ */
+function AccessTokensPanel() {
+  const notify = useStore((s) => s.notify);
+  const [tokens, setTokens] = useState<AccessToken[] | null>(null);
+  const [label, setLabel] = useState('');
+  const [created, setCreated] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(() => {
+    api
+      .listAccessTokens()
+      .then(setTokens)
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  useEffect(load, [load]);
+
+  const create = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await api.createAccessToken(label.trim());
+      /* Montré une seule fois : seule l'empreinte est conservée, et le
+         réafficher supposerait de stocker la valeur en clair. */
+      setCreated(result.value);
+      setLabel('');
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async (id: string) => {
+    setError(null);
+    try {
+      await api.revokeAccessToken(id);
+      notify('Jeton révoqué.');
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  return (
+    <div className="mt-4">
+      <div className="section-label">Jetons d’accès</div>
+      <p className="text-faint text-xs">
+        Un jeton par personne ou par script. Son nom suit ce qu’il fait : une approbation dit
+        désormais <em>qui</em> a tranché, et pas seulement par quel canal. Révoquer un jeton n’a
+        aucun effet sur les autres. Le jeton principal, celui de la configuration, reste toujours
+        valable — c’est lui qui permet de reprendre la main.
+      </p>
+
+      {error && <ErrorText>{error}</ErrorText>}
+
+      {created && (
+        <div className="card card-ok mt-2" role="status">
+          <div>Jeton créé. Il ne sera plus affiché :</div>
+          <pre className="mono-preview">{created}</pre>
+          <button className="btn ghost sm" onClick={() => setCreated(null)}>
+            J’ai noté
+          </button>
+        </div>
+      )}
+
+      <div className="row gap-2 mt-2 items-baseline">
+        <input
+          className="input"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Nom (une personne, un script…)"
+        />
+        <button className="btn" onClick={() => void create()} disabled={busy || !label.trim()}>
+          Créer un jeton
+        </button>
+      </div>
+
+      {tokens && tokens.length > 0 && (
+        <div className="table-wrap mt-3">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Nom</th>
+                <th>Aperçu</th>
+                <th>Dernier usage</th>
+                <th>État</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.map((t) => (
+                <tr key={t.id}>
+                  <td className="text-strong">{t.label}</td>
+                  <td className="mono">{t.preview}</td>
+                  <td>{t.lastUsedAt ? fmtDateTime(t.lastUsedAt) : 'jamais'}</td>
+                  <td>
+                    {t.revokedAt ? (
+                      <span className="badge cancelled">révoqué</span>
+                    ) : (
+                      <span className="badge succeeded">actif</span>
+                    )}
+                  </td>
+                  <td>
+                    {!t.revokedAt && (
+                      <ConfirmButton
+                        label="Révoquer"
+                        confirmLabel={`Révoquer « ${t.label} » ?`}
+                        onConfirm={() => void revoke(t.id)}
+                      />
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

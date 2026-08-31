@@ -42,6 +42,13 @@ export interface ConfigForm {
   resiliencePolicyId: string;
   allowedTools: string;
   disallowedTools: string;
+  /* Confinement. Les listes sont saisies en texte, une entrée par ligne. */
+  sandboxEnabled: boolean;
+  sandboxRequired: boolean;
+  sandboxStrict: boolean;
+  sandboxDomains: string;
+  sandboxAllowWrite: string;
+  sandboxDenyRead: string;
 }
 
 export function toForm(agent: AgentConfig): ConfigForm {
@@ -66,6 +73,41 @@ export function toForm(agent: AgentConfig): ConfigForm {
     resiliencePolicyId: agent.resiliencePolicyId ?? '',
     allowedTools: agent.allowedTools?.join('\n') ?? '',
     disallowedTools: agent.disallowedTools?.join('\n') ?? '',
+    sandboxEnabled: agent.sandbox?.enabled ?? false,
+    sandboxRequired: agent.sandbox?.failIfUnavailable ?? false,
+    /* Liste blanche stricte par défaut : un confinement qui demande au lieu de
+       refuser ne confine pas grand-chose sur un agent qu'on juge risqué. */
+    sandboxStrict: agent.sandbox?.strictAllowlist ?? true,
+    sandboxDomains: agent.sandbox?.allowedDomains.join('\n') ?? '',
+    sandboxAllowWrite: agent.sandbox?.allowWrite.join('\n') ?? '',
+    sandboxDenyRead: agent.sandbox?.denyRead.join('\n') ?? '',
+  };
+}
+
+/** Découpe une saisie multiligne en liste, entrées vides écartées. */
+export function parseLines(value: string): string[] {
+  return value
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Reconstitue le confinement à partir du formulaire.
+ *
+ * Rend `null` quand la case est décochée, et non un objet désactivé : c'est
+ * ainsi que la base distingue « jamais configuré » de « configuré puis éteint »,
+ * et l'absence est le comportement historique.
+ */
+export function toSandbox(form: ConfigForm): AgentConfig['sandbox'] {
+  if (!form.sandboxEnabled) return null;
+  return {
+    enabled: true,
+    failIfUnavailable: form.sandboxRequired,
+    strictAllowlist: form.sandboxStrict,
+    allowedDomains: parseLines(form.sandboxDomains),
+    allowWrite: parseLines(form.sandboxAllowWrite),
+    denyRead: parseLines(form.sandboxDenyRead),
   };
 }
 

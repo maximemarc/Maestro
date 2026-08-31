@@ -12,10 +12,13 @@ import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import { RUN_INTERRUPTED_BY_RESTART, type ServerEvent } from '@maestro/shared';
 import { AgentService } from './agents.ts';
+import { authorize, deniedBody } from './auth.ts';
+import { makeIdentityResolver } from './identity.ts';
 import { Bus } from './bus.ts';
 import { loadConfig } from './config.ts';
 import { ConnectorRegistry } from './connectors.ts';
 import { Store } from './db.ts';
+import { createSecretBox } from './secrets.ts';
 import { TaskService } from './kanban.ts';
 import { Metrics } from './metrics.ts';
 import { ApprovalBroker } from './permissions.ts';
@@ -35,15 +38,23 @@ import { RunEngine } from './runs.ts';
 import { Scheduler } from './scheduler.ts';
 import { SkillRegistry } from './skills.ts';
 import { ChannelRegistry } from './channels/registry.ts';
-import { registerInboundRoutes } from './channels/inbound.ts';
-import { SlackChannel, slackConfigFromEnv } from './channels/slack.ts';
+import { DiscordChannel } from './channels/discord.ts';
+import { SlackChannel } from './channels/slack.ts';
 import { TelegramChannel } from './channels/telegram.ts';
 import { WebhookChannel, webhookConfigFromEnv } from './channels/webhook.ts';
+import { MaintenanceService } from './maintenance.ts';
 import { TmuxBridge } from './tmux.ts';
+import { TrainingService } from './training.ts';
 import { nowIso } from './util.ts';
 
 const config = loadConfig();
-const store = new Store(config.dbPath);
+/*
+ * 🔒 Les secrets des serveurs MCP sont chiffrés en base, avec une clé conservée
+ * dans un fichier séparé. Séparer la clé de la base est l'essentiel : les deux
+ * ne voyagent pas ensemble, et une sauvegarde copiée ne suffit plus à divulguer
+ * les jetons qu'elle contient.
+ */
+const store = new Store(config.dbPath, createSecretBox(config.dataDir));
 const bus = new Bus(store);
 const startedAt = nowIso();
 
@@ -96,12 +107,22 @@ const federation = new FederationService(store, bus);
 engine.attachFederation(federation);
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
-const telegram = new TelegramChannel(config, store, bus, engine, agents, approvals);
-const slack = new SlackChannel(slackConfigFromEnv(), store, bus, engine, agents, approvals);
+const training = new TrainingService(store, bus, engine, agents);
+const maintenance = new MaintenanceService(store, bus, config);
+/*
+ * Les canaux passent par un registre : un seul abonnement au bus, une seule
+ * règle « faut-il notifier ». Les passerelles s'abonnaient chacune de son côté,
+ * avec sa propre version de la règle — et les versions avaient divergé.
+ */
 const channels = new ChannelRegistry(
-  [telegram, slack, new WebhookChannel(webhookConfigFromEnv(), bus)],
+  [
+    new TelegramChannel(config, store, bus, engine, agents, approvals),
+    new SlackChannel(config, store, bus, engine, agents),
+    new DiscordChannel(config, store, bus, engine, agents, approvals),
+    new WebhookChannel(webhookConfigFromEnv(), bus),
+  ],
   bus,
-  { store, agents, engine },
+  { store, agents },
 );
 const connectors = new ConnectorRegistry();
 const radar = new SessionRadar(config, store, bus, agents);
@@ -111,6 +132,18 @@ scheduler.init();
 channels.start();
 externalSessions.start();
 heartbeat.start();
+/*
+ * Après `failStaleActiveRuns` : les runs orphelins sont déjà clôturés, la
+ * reprise voit donc des échantillons dont le run est bel et bien terminé et
+ * peut les remettre en file sans risquer de les compter deux fois.
+ */
+training.resumeInterrupted();
+/*
+ * Entretien : un passage au démarrage, puis toutes les six heures. Sans
+ * rétention configurée il ne supprime rien — c'est un réglage qu'on active en
+ * connaissance de cause.
+ */
+maintenance.start();
 
 // ---------------------------------------------------------------------------
 // HTTP + WebSocket
@@ -140,40 +173,27 @@ await app.register(fastifyWebsocket);
 /*
  * Authentification : jeton requis sur /api/*, /mcp et /ws.
  *
- * Le jeton en paramètre de requête est réservé à /ws, et à lui seul. L'API des
- * navigateurs ne permet pas d'en-tête sur une connexion WebSocket, donc le
- * paramètre y est incontournable ; partout ailleurs il ne servait à rien et
- * faisait fuir le secret dans les journaux du serveur, ceux du reverse proxy et
- * l'historique du navigateur.
+ * La décision elle-même vit dans `auth.ts`, avec ses tests — elle était ici, au
+ * milieu de l'assemblage, où rien ne pouvait la vérifier, alors que c'est le
+ * seul rempart entre l'extérieur et le lancement d'agents.
  */
-const isAuthorized = (
-  req: { headers: Record<string, unknown>; query: unknown },
-  allowQueryToken: boolean,
-): boolean => {
-  const header = req.headers['authorization'];
-  if (typeof header === 'string' && header === `Bearer ${config.authToken}`) return true;
-  if (!allowQueryToken) return false;
-  const token = (req.query as { token?: string } | undefined)?.token;
-  return token === config.authToken;
-};
+const resolveIdentity = makeIdentityResolver(store, config.authToken);
 
 app.addHook('onRequest', async (req, reply) => {
-  const url = req.raw.url ?? '';
-  const isWebSocket = url.startsWith('/ws');
-  const isGateway = url.startsWith('/mcp');
-  if (!isWebSocket && !isGateway && !url.startsWith('/api/')) return;
-  if (url.startsWith('/api/health')) return;
-  if (isAuthorized(req, isWebSocket)) return;
-  // Un client MCP ne sait lire qu'une enveloppe JSON-RPC : lui répondre dans sa
-  // langue lui permet d'afficher la cause au lieu d'un « erreur inconnue ».
-  if (isGateway) {
-    return reply.code(401).send({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: 'Jeton invalide ou manquant' },
-      id: null,
-    });
+  const outcome = authorize(
+    { url: req.raw.url ?? '', headers: req.headers, query: req.query },
+    resolveIdentity,
+  );
+  if (outcome.kind === 'denied') {
+    return reply.code(401).send(deniedBody(outcome.shape));
   }
-  return reply.code(401).send({ error: 'Jeton invalide ou manquant' });
+  /*
+   * L'identité suit la requête jusqu'à ses effets. C'est elle qui permet de
+   * dire qui a approuvé quoi — « web » disait par où, jamais par qui.
+   */
+  if (outcome.kind === 'allowed') {
+    (req as { identity?: unknown }).identity = outcome.identity;
+  }
 });
 
 app.register(async (scope) => {
@@ -186,7 +206,7 @@ app.register(async (scope) => {
           version: config.version,
           startedAt,
           dataDir: config.dataDir,
-          telegramEnabled: telegram.enabled,
+          telegramEnabled: channels.enabled,
           tmuxAvailable: false,
         },
         metrics: metrics.snapshot(),
@@ -221,6 +241,8 @@ registerRoutes(app, {
   engine,
   scheduler,
   pipelines,
+  training,
+  maintenance,
   metrics,
   connectors,
   plugins: pluginService,
@@ -232,16 +254,9 @@ registerRoutes(app, {
   handoffs,
   heartbeat,
   federation,
-  telegramEnabled: telegram.enabled,
+  telegramEnabled: channels.enabled,
   startedAt,
 });
-
-/*
- * Canaux entrants (Slack…). Comme /mcp, déclarés avant le front statique dont
- * le repli SPA capterait autrement /hooks — un webhook recevrait une page HTML
- * en guise de réponse, et le diagnostic serait pénible.
- */
-await registerInboundRoutes(app, channels, bus);
 
 /*
  * Passerelle MCP : les outils Maestro pour les clients tiers (Codex, OpenCode,
@@ -261,6 +276,7 @@ registerMcpGateway(app, {
     agents,
     bus,
     engine,
+    skills,
     maxAgentDepth: () => store.getSettings().maxAgentDepth,
   },
   sessions: externalSessions,
@@ -305,6 +321,10 @@ const shutdown = async (): Promise<void> => {
   radar.stop();
   scheduler.shutdown();
   channels.stop();
+  // Avant l'arrêt du moteur : les lots cessent de dépiler, et restent marqués
+  // « running » pour reprendre au prochain démarrage.
+  training.shutdown();
+  maintenance.stop();
   engine.shutdown();
   await app.close();
   store.close();
