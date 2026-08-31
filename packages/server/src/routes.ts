@@ -26,6 +26,7 @@ import { RagError, type RagService } from './rag.ts';
 import type { SessionRadar } from './radar.ts';
 import type { SkillRegistry } from './skills.ts';
 import type { TmuxBridge } from './tmux.ts';
+import { RUN_INTERRUPTED_BY_RESTART } from '@maestro/shared';
 import {
   WorkspaceGitError,
   branchNameFor,
@@ -941,6 +942,20 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     const days = Math.min(Number(q.days ?? 30) || 30, 365);
     const since = new Date(Date.now() - days * 86400_000).toISOString();
     return s.store.tokensBy(groupBy, since);
+  });
+
+  /*
+   * Bilan d'exécution sur une période.
+   *
+   * Séparé de `metrics/tokens` parce que ce sont deux questions différentes :
+   * l'une porte sur ce que ça coûte, l'autre sur ce qui aboutit. Les mêler dans
+   * une réponse obligerait chaque appelant à ignorer la moitié du contenu.
+   */
+  app.get('/api/metrics/runs', async (req) => {
+    const q = req.query as { days?: string };
+    const days = Math.min(365, Math.max(1, Number(q.days ?? 7) || 7));
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    return s.store.runStats(since, RUN_INTERRUPTED_BY_RESTART);
   });
 
   // -- Paramètres -------------------------------------------------------------------------------------

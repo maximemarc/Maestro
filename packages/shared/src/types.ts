@@ -586,6 +586,23 @@ export interface AgentStats {
   lastRunAt: string | null;
 }
 
+/**
+ * Bilan d'exécution sur une période.
+ *
+ * Calculé côté serveur, et non dérivé des runs déjà reçus par l'interface :
+ * celle-ci n'en garde que les deux cents derniers, ce qui suffit à une journée
+ * mais pas à un mois. Un taux de réussite faux est pire qu'absent.
+ */
+export interface RunStats {
+  total: number;
+  succeeded: number;
+  /** Échecs réels : les runs clôturés par un redémarrage sont écartés. */
+  failed: number;
+  cancelled: number;
+  /** Médiane et non moyenne : un run très long ne doit pas tout emporter. */
+  medianDurationMs: number | null;
+}
+
 export interface TokensByBucket {
   /** Clé du groupe : date (YYYY-MM-DD), agentId ou modèle. */
   bucket: string;

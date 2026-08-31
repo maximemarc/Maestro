@@ -20,6 +20,19 @@ import {
 import { useStore } from '../lib/store';
 import HomePage from './HomePage';
 
+/*
+ * jsdom n'implémente pas ResizeObserver, dont le graphique se sert pour
+ * s'adapter à la largeur disponible. Le manque appartient à l'environnement de
+ * test, pas au code : tous les navigateurs visés l'exposent. Sans ce
+ * comblement, le montage du graphique fait tomber l'arbre React entier.
+ */
+class ResizeObserverStub {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+globalThis.ResizeObserver ??= ResizeObserverStub as unknown as typeof ResizeObserver;
+
 const AGENT = {
   id: 'agt_1',
   name: 'Comptabilité',
@@ -68,6 +81,13 @@ function show() {
    chaque test qui s'y intéresse fournit sa propre série. */
 beforeEach(() => {
   vi.spyOn(api, 'tokensBy').mockResolvedValue([]);
+  vi.spyOn(api, 'runStats').mockResolvedValue({
+    total: 0,
+    succeeded: 0,
+    failed: 0,
+    cancelled: 0,
+    medianDurationMs: null,
+  });
 });
 
 afterEach(() => {
@@ -177,62 +197,65 @@ describe('bruit technique', () => {
   });
 });
 
-describe('chiffres de la journée', () => {
-  it('compte les réussites, les échecs et le taux', () => {
-    seed({
-      runs: [
-        run({ id: 'r1', status: 'succeeded', costUsd: 0.2 }),
-        run({ id: 'r2', status: 'succeeded', costUsd: 0.1 }),
-        run({ id: 'r3', status: 'failed', error: 'Timeout', costUsd: 0.05 }),
-      ],
+describe('chiffres de la période', () => {
+  it('affiche les chiffres de la semaine, pas ceux du jour', async () => {
+    // Cas réel qui a motivé la refonte : rien aujourd'hui, quinze runs sur la
+    // semaine. La section doit montrer la semaine, pas des zéros.
+    vi.spyOn(api, 'runStats').mockResolvedValue({
+      total: 15,
+      succeeded: 7,
+      failed: 0,
+      cancelled: 6,
+      medianDurationMs: 719_000,
     });
-    show();
-    expect(screen.getByText('67 % de réussite')).toBeDefined();
-    expect(screen.getByText(/1 échoué/)).toBeDefined();
-  });
-
-  it("n'impute pas au taux de réussite un run clôturé par un redémarrage", () => {
-    seed({
-      runs: [
-        run({ id: 'r1', status: 'succeeded', costUsd: 0.2 }),
-        run({ id: 'r2', status: 'failed', error: RUN_INTERRUPTED_BY_RESTART }),
-      ],
-    });
-    show();
-    // Deux runs du jour, un seul réussi, mais aucun échec imputable.
-    expect(screen.queryByText(/échoué/)).toBeNull();
-  });
-
-  it('reste lisible sans aucun run du jour', () => {
-    seed({});
-    show();
-    // Ni division par zéro, ni « NaN % » : les cases sans donnée le disent.
-    expect(screen.queryByText(/NaN/)).toBeNull();
-    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
-  });
-
-  it('signale un coût qui dépasse la moyenne de la semaine', async () => {
-    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
     vi.spyOn(api, 'tokensBy').mockResolvedValue([
       {
-        bucket: yesterday,
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        costUsd: 1,
-        runs: 2,
+        bucket: '2026-08-25',
+        inputTokens: 6000,
+        outputTokens: 2000,
+        cacheReadTokens: 185427,
+        costUsd: 0.2471,
+        runs: 7,
+      },
+      {
+        bucket: '2026-08-26',
+        inputTokens: 6000,
+        outputTokens: 2000,
+        cacheReadTokens: 200000,
+        costUsd: 0.3,
+        runs: 8,
       },
     ]);
-    seed({ runs: [run({ id: 'r1', status: 'succeeded', costUsd: 2 })] });
+    seed({});
     show();
-    await waitFor(() => expect(screen.getByText(/100 % vs moyenne 7 j/)).toBeDefined());
+
+    await waitFor(() => expect(screen.getByText('7 réussis')).toBeDefined());
+
+    /* Le libellé est découpé entre plusieurs nœuds JSX : on interroge le texte
+       de la section entière, ce qui résiste aussi à un futur retour à la ligne. */
+    const section = screen.getByLabelText('Chiffres de la période').textContent ?? '';
+    expect(section).toContain('47 % de réussite');
+    expect(section).toContain('6 annulé');
+    // Total de la période, et non le chiffre d'un seul jour.
+    expect(section).toContain('$0.5471');
+    expect(section).toContain('par jour actif');
+    expect(section).toContain('97 %');
+    expect(section).toContain('11m 59s');
+    expect(section).toContain("rien dépensé aujourd'hui");
   });
 
-  it("n'empêche pas l'affichage quand la tendance est indisponible", async () => {
-    vi.spyOn(api, 'tokensBy').mockRejectedValue(new Error('hors ligne'));
-    seed({ runs: [run({ id: 'r1', status: 'succeeded', costUsd: 0.5 })] });
+  it('invite à élargir la fenêtre quand la période est vide', async () => {
+    seed({});
     show();
-    await waitFor(() => expect(screen.getByText('100 % de réussite')).toBeDefined());
-    expect(screen.queryByText(/vs moyenne/)).toBeNull();
+    await waitFor(() => expect(screen.getByText(/Aucun run sur cette période/)).toBeDefined());
+    expect(screen.getByText(/Élargis la fenêtre/)).toBeDefined();
+  });
+
+  it("n'empêche pas l'affichage de la file quand les chiffres échouent", async () => {
+    vi.spyOn(api, 'runStats').mockRejectedValue(new Error('hors ligne'));
+    seed({});
+    show();
+    await waitFor(() => expect(screen.getByText(/Chiffres indisponibles/)).toBeDefined());
+    expect(screen.getByText(/Rien n'attend de décision/)).toBeDefined();
   });
 });

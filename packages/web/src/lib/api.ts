@@ -37,6 +37,7 @@ import type {
   ResolveApprovalRequest,
   Routine,
   Run,
+  RunStats,
   RunWithEvents,
   WorkspaceChanges,
   CommitResult,
@@ -334,6 +335,7 @@ export const api = {
 
   // Métriques
   agentStats: () => request<AgentStats[]>('GET', '/api/metrics/agents'),
+  runStats: (days = 7) => request<RunStats>('GET', `/api/metrics/runs?days=${days}`),
   tokensBy: (groupBy: 'day' | 'agent' | 'model', days = 30) =>
     request<TokensByBucket[]>('GET', `/api/metrics/tokens?groupBy=${groupBy}&days=${days}`),
 
