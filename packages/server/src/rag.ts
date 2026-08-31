@@ -220,29 +220,29 @@ export class RagService {
     if (!model) return collection;
     return {
       ...collection,
-      staleChunkCount: this.store.countStaleEmbeddings(collection.id, model),
+      staleChunkCount: this.store.rag.countStaleEmbeddings(collection.id, model),
     };
   }
 
   list(): RagCollection[] {
-    return this.store.listRagCollections().map((c) => this.withStale(c));
+    return this.store.rag.listCollections().map((c) => this.withStale(c));
   }
 
   get(id: string): RagCollection | null {
-    const collection = this.store.getRagCollection(id);
+    const collection = this.store.rag.getCollection(id);
     return collection ? this.withStale(collection) : null;
   }
 
   documents(collectionId: string): RagDocument[] {
-    return this.store.listRagDocuments(collectionId);
+    return this.store.rag.listDocuments(collectionId);
   }
 
   create(input: CollectionInput): RagCollection {
     const collection = this.normalise(input, null);
-    if (this.store.getRagCollectionBySlug(collection.slug)) {
+    if (this.store.rag.getCollectionBySlug(collection.slug)) {
       throw new RagError(`Une collection porte déjà l'identifiant « ${collection.slug} ».`);
     }
-    this.store.upsertRagCollection(collection);
+    this.store.rag.upsertCollection(collection);
     const saved = this.get(collection.id)!;
     this.bus.log('info', 'rag', `Collection « ${saved.name} » créée`);
     this.bus.publish({ type: 'rag.updated', payload: saved });
@@ -250,32 +250,32 @@ export class RagService {
   }
 
   update(id: string, input: CollectionInput): RagCollection {
-    const existing = this.store.getRagCollection(id);
+    const existing = this.store.rag.getCollection(id);
     if (!existing) throw new RagError('Collection introuvable.');
     const collection = this.normalise(input, existing);
-    const clash = this.store.getRagCollectionBySlug(collection.slug);
+    const clash = this.store.rag.getCollectionBySlug(collection.slug);
     if (clash && clash.id !== id) {
       throw new RagError(`Une collection porte déjà l'identifiant « ${collection.slug} ».`);
     }
-    this.store.upsertRagCollection(collection);
+    this.store.rag.upsertCollection(collection);
     const saved = this.get(id)!;
     this.bus.publish({ type: 'rag.updated', payload: saved });
     return saved;
   }
 
   remove(id: string): void {
-    const existing = this.store.getRagCollection(id);
+    const existing = this.store.rag.getCollection(id);
     if (!existing) throw new RagError('Collection introuvable.');
     this.store.detachRagCollectionFromAgents(id);
-    this.store.deleteRagCollection(id);
+    this.store.rag.deleteCollection(id);
     this.bus.log('warn', 'rag', `Collection « ${existing.name} » supprimée`);
     this.bus.publish({ type: 'rag.deleted', payload: { id } });
   }
 
   removeDocument(collectionId: string, documentId: string): void {
-    const doc = this.store.getRagDocument(documentId);
+    const doc = this.store.rag.getDocument(documentId);
     if (!doc || doc.collectionId !== collectionId) throw new RagError('Document introuvable.');
-    this.store.deleteRagDocument(documentId);
+    this.store.rag.deleteDocument(documentId);
     const saved = this.get(collectionId);
     if (saved) this.bus.publish({ type: 'rag.updated', payload: saved });
   }
@@ -321,15 +321,15 @@ export class RagService {
    * dans l'index ferait remonter des passages périmés.
    */
   async ingest(collectionId: string, input: IngestInput): Promise<IngestReport> {
-    const collection = this.store.getRagCollection(collectionId);
+    const collection = this.store.rag.getCollection(collectionId);
     if (!collection) throw new RagError('Collection introuvable.');
 
     const pieces = await this.readSource(input);
     const report: IngestReport = { documents: [], chunks: 0, skipped: pieces.skipped };
 
     for (const piece of pieces.docs) {
-      const previous = this.store.findRagDocumentBySource(collectionId, piece.source);
-      if (previous) this.store.deleteRagDocument(previous.id);
+      const previous = this.store.rag.findDocumentBySource(collectionId, piece.source);
+      if (previous) this.store.rag.deleteDocument(previous.id);
 
       const chunks = chunkText(piece.content, collection.chunkSize, collection.chunkOverlap);
       if (chunks.length === 0) {
@@ -349,8 +349,8 @@ export class RagService {
         chunkCount: chunks.length,
         createdAt: nowIso(),
       };
-      this.store.insertRagDocument(doc, piece.content);
-      this.store.insertRagChunks(
+      this.store.rag.insertDocument(doc, piece.content);
+      this.store.rag.insertChunks(
         chunks.map((content, index) => ({
           id: makeId('chk'),
           collectionId,
@@ -397,11 +397,11 @@ export class RagService {
    * celle d'origine, et l'utilisateur doit le savoir.
    */
   async reindex(collectionId: string): Promise<RagMaintenanceReport> {
-    const collection = this.store.getRagCollection(collectionId);
+    const collection = this.store.rag.getCollection(collectionId);
     if (!collection) throw new RagError('Collection introuvable.');
 
     const report: RagMaintenanceReport = { documents: 0, chunks: 0, removed: 0, skipped: [] };
-    for (const { doc, content } of this.store.listRagDocumentsWithContent(collectionId)) {
+    for (const { doc, content } of this.store.rag.listDocumentsWithContent(collectionId)) {
       if (content === null) {
         report.skipped.push({
           source: doc.source || doc.title,
@@ -416,8 +416,8 @@ export class RagService {
       }
       /* Les anciens morceaux et leurs entrées d'index partent d'abord : garder
          les deux découpes ferait remonter deux fois le même passage. */
-      this.store.deleteChunksOfDocument(doc.id);
-      this.store.insertRagChunks(
+      this.store.rag.deleteChunksOfDocument(doc.id);
+      this.store.rag.insertChunks(
         chunks.map((text, index) => ({
           id: makeId('chk'),
           collectionId,
@@ -450,12 +450,12 @@ export class RagService {
    * des passages qui n'existent plus.
    */
   async refresh(collectionId: string): Promise<RagMaintenanceReport> {
-    const collection = this.store.getRagCollection(collectionId);
+    const collection = this.store.rag.getCollection(collectionId);
     if (!collection) throw new RagError('Collection introuvable.');
 
     const report: RagMaintenanceReport = { documents: 0, chunks: 0, removed: 0, skipped: [] };
-    for (const root of this.store.listRagIngestRoots(collectionId)) {
-      const before = this.store.listRagDocumentsByRoot(collectionId, root.ingestRoot);
+    for (const root of this.store.rag.listIngestRoots(collectionId)) {
+      const before = this.store.rag.listDocumentsByRoot(collectionId, root.ingestRoot);
       let ingested;
       try {
         ingested = await this.ingest(collectionId, {
@@ -476,7 +476,7 @@ export class RagService {
       const stillThere = new Set(ingested.documents.map((d) => d.source));
       for (const old of before) {
         if (old.source !== '' && !stillThere.has(old.source)) {
-          this.store.deleteRagDocument(old.id);
+          this.store.rag.deleteDocument(old.id);
           report.removed++;
         }
       }
@@ -493,10 +493,10 @@ export class RagService {
 
   /** Morceaux d'un document, pour voir comment il a été découpé. */
   chunksOfDocument(collectionId: string, documentId: string): RagChunkView[] {
-    const doc = this.store.getRagDocument(documentId);
+    const doc = this.store.rag.getDocument(documentId);
     if (!doc || doc.collectionId !== collectionId) throw new RagError('Document introuvable.');
     const model = embeddingModel();
-    return this.store.listChunksOfDocument(documentId).map((chunk) => ({
+    return this.store.rag.listChunksOfDocument(documentId).map((chunk) => ({
       chunkIndex: chunk.chunkIndex,
       content: chunk.content,
       chars: chunk.content.length,
@@ -681,7 +681,7 @@ export class RagService {
       /* Sont repris les morceaux sans vecteur ET ceux vectorisés par un autre
          modèle : après un changement de fournisseur, les anciens vecteurs sont
          d'une autre dimension, donc incomparables. */
-      const pending = this.store.listChunksNeedingEmbedding(collectionId, model, 64);
+      const pending = this.store.rag.listChunksNeedingEmbedding(collectionId, model, 64);
       if (pending.length === 0) break;
       const vectors = await embed(
         pending.map((c) => c.content),
@@ -689,7 +689,7 @@ export class RagService {
       );
       if (!vectors) break;
       for (let i = 0; i < pending.length; i++) {
-        this.store.setChunkEmbedding(pending[i]!.id, vectors[i]!, model);
+        this.store.rag.setChunkEmbedding(pending[i]!.id, vectors[i]!, model);
       }
       embedded += pending.length;
     }
@@ -712,7 +712,7 @@ export class RagService {
    */
   async search(collectionId: string, query: string, topK: number): Promise<RagSearchResult> {
     const started = Date.now();
-    const collection = this.store.getRagCollection(collectionId);
+    const collection = this.store.rag.getCollection(collectionId);
     if (!collection) throw new RagError('Collection introuvable.');
     const limit = clampInt(topK, 1, 20, 5);
 
@@ -726,7 +726,7 @@ export class RagService {
 
     const ftsQuery = toFtsQuery(query);
     if (ftsQuery !== '') {
-      const lexical = this.store.searchRagLexical(collectionId, ftsQuery, CANDIDATES_PER_ENGINE);
+      const lexical = this.store.rag.searchLexical(collectionId, ftsQuery, CANDIDATES_PER_ENGINE);
       lexical.forEach((hit, index) => bump(hit.chunkId, index, 'lexical'));
     }
 
@@ -743,7 +743,7 @@ export class RagService {
          * l'empreinte mémoire ne dépend plus de la taille de la collection.
          */
         const best: Array<{ chunkId: string; score: number }> = [];
-        const scanned = this.store.forEachEmbeddedChunk(
+        const scanned = this.store.rag.forEachEmbeddedChunk(
           collectionId,
           model,
           EMBEDDING_SCAN_BATCH,
@@ -768,7 +768,7 @@ export class RagService {
 
     const ordered = [...ranks.entries()].sort((a, b) => b[1].rrf - a[1].rrf).slice(0, limit);
     const chunks = new Map(
-      this.store.getChunksByIds(ordered.map(([id]) => id)).map((c) => [c.id, c]),
+      this.store.rag.getChunksByIds(ordered.map(([id]) => id)).map((c) => [c.id, c]),
     );
 
     const hits: RagHit[] = [];
@@ -792,7 +792,7 @@ export class RagService {
   collectionsForAgent(ids: string[]): RagCollection[] {
     const out: RagCollection[] = [];
     for (const id of ids) {
-      const collection = this.store.getRagCollection(id);
+      const collection = this.store.rag.getCollection(id);
       if (collection) out.push(collection);
     }
     return out;

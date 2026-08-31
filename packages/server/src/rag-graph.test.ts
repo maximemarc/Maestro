@@ -48,7 +48,7 @@ beforeEach(() => {
 
   const now = new Date('2026-01-01T00:00:00.000Z').toISOString();
   collectionId = 'rag_test';
-  store.upsertRagCollection({
+  store.rag.upsertCollection({
     id: collectionId,
     slug: 'test',
     name: 'Test',
@@ -65,7 +65,7 @@ beforeEach(() => {
 
   CORPUS.forEach((doc, docIndex) => {
     const documentId = `doc_${docIndex}`;
-    store.insertRagDocument(
+    store.rag.insertDocument(
       {
         id: documentId,
         collectionId,
@@ -85,7 +85,7 @@ beforeEach(() => {
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line !== '');
-    store.insertRagChunks(
+    store.rag.insertChunks(
       chunks.map((content, index) => ({
         id: `chk_${docIndex}_${index}`,
         collectionId,

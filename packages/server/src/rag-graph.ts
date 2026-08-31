@@ -261,13 +261,13 @@ function edgeKey(a: string, b: string): string {
 }
 
 export function buildRagGraph(store: Store, collectionId: string): RagGraph {
-  const collection = store.getRagCollection(collectionId);
+  const collection = store.rag.getCollection(collectionId);
   if (!collection) {
     return { nodes: [], links: [], truncated: false, totalChunks: 0, isolatedCount: 0 };
   }
 
-  const documents = store.listRagDocuments(collectionId);
-  const chunks = store.listChunksOfCollection(collectionId, MAX_GRAPH_CHUNKS);
+  const documents = store.rag.listDocuments(collectionId);
+  const chunks = store.rag.listChunksOfCollection(collectionId, MAX_GRAPH_CHUNKS);
 
   const nodes: RagGraphNode[] = [
     {
@@ -330,7 +330,7 @@ export function buildRagGraph(store: Store, collectionId: string): RagGraph {
 
     let hits;
     try {
-      hits = store.searchRagLexical(collectionId, query, NEIGHBOURS_PER_CHUNK + 1);
+      hits = store.rag.searchLexical(collectionId, query, NEIGHBOURS_PER_CHUNK + 1);
     } catch {
       /* Une requête que l'index refuse ne doit pas emporter tout le graphe :
          ce passage restera simplement sans voisin. */
