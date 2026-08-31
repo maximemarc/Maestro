@@ -1,26 +1,28 @@
-# Ce qui n'a rien à faire dans le contexte de construction.
+# Contexte de construction minimal : tout ce qui suit serait recopié pour rien,
+# et certaines entrées ne doivent jamais entrer dans une image.
 #
 # Les worktrees sont des copies complètes du dépôt : les inclure multiplierait
 # la taille du contexte et ferait entrer dans l'image le travail en cours d'une
 # autre branche.
-.claude/worktrees/
+.claude
+.agents
 node_modules
 **/node_modules
+packages/*/node_modules
 packages/web/dist
 dist
+.git
+.githooks
 
 # 🔒 Jamais de secret dans une image : le dotenv local reste sur la machine.
 # La configuration d'un conteneur passe par --env-file au lancement.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
-# Données locales : base SQLite, workspaces d'agents.
+# 🔒 Jamais de base ni de jeton dans un contexte de construction : ils
+# contiennent les transcripts, les workspaces et un accès complet à l'API.
 *.db
-*.db-journal
-*.db-wal
-*.db-shm
+*.db-*
+token
 *.log
-
-.git
-.githooks

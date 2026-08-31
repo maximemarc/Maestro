@@ -1,41 +1,103 @@
-# Déploiement Maestro par conteneur.
+# Déploiement Maestro par conteneur — optionnel.
 #
 # Lancement :
 #   docker compose up -d --build
 #
-# 🔒 La publication est volontairement bornée à la boucle locale de l'hôte.
-# Exposer l'API sur toutes les interfaces la laisserait accessible à tout le
-# réseau derrière un unique jeton ; ce qui doit être publié passe par un reverse
-# proxy, avec TLS et son propre contrôle d'accès.
+# Rien n'oblige à passer par là : Maestro tourne très bien avec `npm start`, et
+# le confinement fin des agents se règle par agent (bac à sable, voir le README).
+# Ce fichier existe pour le cas où l'on veut une frontière dure autour de
+# l'instance entière — un poste partagé, un VPS, un agent auquel on ne fait pas
+# confiance du tout. Ce qu'un conteneur apporte alors, c'est une frontière que
+# l'agent ne peut pas raisonner : il ne voit ni le reste du disque, ni les
+# autres processus de la machine.
+#
+# 🔒 Le durcissement vit ici et non dans l'image : une image ne peut pas se
+# durcir elle-même, c'est l'exécution qui le fait.
 services:
   maestro:
     build: .
     # 🔒 En production, remplace `build` par une image versionnée du registre
     # interne — jamais `latest` : `registry.cneidf.net/maestro:0.1.0`.
     image: maestro:0.1.0
+    container_name: maestro
     restart: unless-stopped
+
     # Node est PID 1 pour recevoir SIGTERM directement, mais ne récolte pas les
     # zombies. Maestro lance des fils (claude, git, tmux) : sans init, ils
     # s'accumuleraient sur une instance de longue durée.
     init: true
+
     ports:
+      # 🔒 Sur 127.0.0.1 volontairement. Exposer 4520 sur toutes les interfaces
+      # publierait l'API — et donc le lancement d'agents — sur le réseau local,
+      # derrière un unique jeton. Pour un accès distant, un reverse proxy TLS
+      # devant, jamais ce port nu.
       - '127.0.0.1:4520:4520'
+
     # Les secrets viennent d'un fichier hors dépôt, jamais de ce YAML.
     env_file:
       - path: .env
         required: false
+
     environment:
       # Dans le conteneur, écouter sur la boucle locale rendrait le service
       # injoignable : c'est la publication ci-dessus qui borne l'exposition.
       MAESTRO_HOST: 0.0.0.0
       MAESTRO_PORT: '4520'
       MAESTRO_DATA_DIR: /data
+      # Jeton : à définir dans le .env non versionné, ou laissé vide pour qu'un
+      # jeton soit engendré au premier démarrage et écrit dans /data/token.
+      MAESTRO_TOKEN: ${MAESTRO_TOKEN:-}
+      # Authentification du client Claude Code. Deux voies : une clé d'API, ou
+      # le montage de ~/.claude ci-dessous qui réutilise la session existante.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
     volumes:
       # Base SQLite, workspaces d'agents, skills, jeton : tout l'état vit ici.
       - maestro-data:/data
+      # Réutilise l'authentification Claude Code de la machine.
+      #
+      # En lecture-écriture, et non en lecture seule : le CLI met à jour ses
+      # propres fichiers de session. À commenter si l'on préfère la clé d'API —
+      # c'est le montage qui donne le plus de surface au conteneur.
+      - ${HOME}/.claude:/home/node/.claude
       # Décommente pour confier au conteneur des dépôts de l'hôte sur lesquels
       # les agents travailleront. En lecture-écriture : un agent qui code écrit.
       # - /chemin/vers/tes/projets:/projets
+
+    # -- Durcissement ---------------------------------------------------------
+    #
+    # C'est ici que se joue « limiter les agents », pas dans l'image.
+
+    # Racine en lecture seule : un agent ne peut pas modifier le système du
+    # conteneur. Ce qui doit rester inscriptible l'est explicitement.
+    read_only: true
+
+    tmpfs:
+      # Le SDK extrait le CLI Claude embarqué dans un répertoire temporaire au
+      # démarrage : sans /tmp inscriptible, aucune session ne démarre.
+      - /tmp:rw,noexec,nosuid,size=512m
+
+    cap_drop:
+      - ALL
+    security_opt:
+      # Interdit l'escalade par binaire setuid, y compris pour un processus que
+      # l'agent lancerait lui-même.
+      - no-new-privileges:true
+
+    # Plafonds. Un agent qui part en boucle consomme le conteneur, pas la
+    # machine — et un fork bomb se heurte à pids_limit.
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: 2.0
+
+    # Journalisation bornée : un run bavard ne remplit pas le disque.
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
     healthcheck:
       test:
         - CMD-SHELL
@@ -45,6 +107,7 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+
     # Maestro traite SIGTERM : il clôt ses sessions et ferme la base. Le délai
     # laisse ce travail aboutir avant l'arrêt forcé.
     stop_signal: SIGTERM

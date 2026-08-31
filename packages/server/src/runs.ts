@@ -45,9 +45,55 @@ import type { ApprovalBroker } from './permissions.ts';
 import type { McpRegistry } from './mcp-registry.ts';
 import type { PluginService } from './plugins.ts';
 import type { RagService } from './rag.ts';
+import { buildSandboxSettings, describeSandbox } from './sandbox.ts';
 import type { SkillRegistry } from './skills.ts';
 import { TmuxBridge } from './tmux.ts';
 import { makeId, nowIso, truncate } from './util.ts';
+
+/** Longueurs de capture d'un transcript destiné à la lecture. */
+const TOOL_RESULT_LIMIT = 1500;
+const THINKING_LIMIT = 2000;
+/** Et celles d'une capture destinée à l'entraînement (voir Settings). */
+const FULL_TOOL_RESULT_LIMIT = 60_000;
+const FULL_THINKING_LIMIT = 20_000;
+
+/**
+ * Priorité d'un run dans la file.
+ *
+ * Elle ne vient pas d'un réglage mais de l'origine, parce que c'est l'origine
+ * qui dit si quelqu'un attend devant son écran. Un lot d'entraînement de mille
+ * échantillons occupait sinon les quatre places du plafond pendant des heures,
+ * et un run lancé à la main restait derrière lui sans explication.
+ */
+export type RunPriority = 'interactive' | 'normal' | 'background';
+
+/**
+ * Origines derrière lesquelles un humain attend une réponse.
+ *
+ * Le kanban en fait partie : on y confie une carte et on regarde la colonne
+ * bouger. Une routine cron, non — personne n'est devant.
+ */
+const INTERACTIVE_ORIGINS: readonly RunOrigin[] = [
+  'manual',
+  'telegram',
+  'discord',
+  'slack',
+  'kanban',
+];
+
+export function priorityForOrigin(origin: RunOrigin): RunPriority {
+  if (INTERACTIVE_ORIGINS.includes(origin)) return 'interactive';
+  // Un échantillon de lot est du travail de fond par définition : il en existe
+  // des milliers, et aucun n'est attendu individuellement.
+  if (origin === 'training') return 'background';
+  return 'normal';
+}
+
+const PRIORITY_RANK: Record<RunPriority, number> = {
+  interactive: 0,
+  normal: 1,
+  background: 2,
+};
 
 export interface StartRunInput {
   agentId: string;
@@ -80,6 +126,8 @@ export interface StartRunInput {
    * à ce run. Renseigné par la fédération, propagé aux délégations suivantes.
    */
   federationHops?: number;
+  /** Force la priorité ; par défaut elle se déduit de l'origine. */
+  priority?: RunPriority;
 }
 
 /** Paramètres d'un run en file, conservés jusqu'à son démarrage effectif. */
@@ -89,11 +137,13 @@ interface QueuedParams {
   bypassConcurrencyCap: boolean;
   policyOverride: string | null;
   federationHops: number;
+  priority: RunPriority;
 }
 
 interface ActiveRun {
   abort: AbortController;
   depth: number;
+  priority: RunPriority;
   report: string | null;
   cancelStatus: RunStatus | null;
   stderrTail: string;
@@ -220,6 +270,7 @@ export class RunEngine {
       bypassConcurrencyCap: input.bypassConcurrencyCap ?? false,
       policyOverride: input.resiliencePolicyId ?? null,
       federationHops: input.federationHops ?? 0,
+      priority: input.priority ?? priorityForOrigin(input.origin),
     });
     this.queue.push(run.id);
     this.pump();
@@ -331,20 +382,56 @@ export class RunEngine {
 
       const busyAgents = new Set<string>();
       let cappedActive = 0;
+      let backgroundActive = 0;
       for (const [activeId, entry] of this.active) {
         const activeRun = this.store.getRun(activeId);
         if (!activeRun) continue;
         busyAgents.add(activeRun.agentId);
         if (!entry.bypassConcurrencyCap) cappedActive++;
+        if (entry.priority === 'background') backgroundActive++;
       }
       const slotAvailable = cappedActive < settings.maxConcurrentRuns;
 
-      const idx = this.queue.findIndex((runId) => {
+      /*
+       * Une place est tenue hors de portée du travail de fond.
+       *
+       * Un lot d'entraînement de mille échantillons occupait sinon les quatre
+       * places du plafond pendant des heures : un run lancé à la main attendait
+       * derrière lui, sans que rien n'explique pourquoi. Le fond ne peut donc
+       * jamais prendre la dernière place. Sur un plafond de 1, ce garde-fou est
+       * neutralisé — sinon aucun lot ne démarrerait jamais.
+       */
+      const backgroundCap = Math.max(1, settings.maxConcurrentRuns - 1);
+      const backgroundAllowed = backgroundActive < backgroundCap;
+
+      const eligible = (runId: string): boolean => {
         const run = this.store.getRun(runId);
         if (!run || busyAgents.has(run.agentId)) return false;
-        return slotAvailable || (this.queuedParams.get(runId)?.bypassConcurrencyCap ?? false);
-      });
-      if (idx === -1) return; // agents occupés, ou plafond atteint
+        const params = this.queuedParams.get(runId);
+        if (params?.bypassConcurrencyCap) return true;
+        if (!slotAvailable) return false;
+        return params?.priority === 'background' ? backgroundAllowed : true;
+      };
+
+      /*
+       * À égalité d'éligibilité, la priorité tranche — et l'ordre d'arrivée
+       * départage. `findIndex` seul servait le premier arrivé quelle que soit
+       * son urgence, ce qui plaçait un échantillon de lot devant une demande
+       * humaine.
+       */
+      let idx = -1;
+      let bestRank = Number.POSITIVE_INFINITY;
+      for (let i = 0; i < this.queue.length; i++) {
+        const runId = this.queue[i];
+        if (!runId || !eligible(runId)) continue;
+        const rank = PRIORITY_RANK[this.queuedParams.get(runId)?.priority ?? 'normal'];
+        if (rank < bestRank) {
+          bestRank = rank;
+          idx = i;
+          if (rank === 0) break; // rien ne passe devant l'interactif
+        }
+      }
+      if (idx === -1) return; // agents occupés, plafond atteint, ou place réservée
       const runId = this.queue.splice(idx, 1)[0];
       if (!runId) return;
       // execute() renseigne this.active de façon synchrone avant tout await :
@@ -375,14 +462,21 @@ export class RunEngine {
   private async execute(runId: string): Promise<void> {
     const params = this.queuedParams.get(runId);
     this.queuedParams.delete(runId);
-    const { depth, timeoutSecOverride, bypassConcurrencyCap, policyOverride, federationHops } =
-      params ?? {
-        depth: 0,
-        timeoutSecOverride: null,
-        bypassConcurrencyCap: false,
-        policyOverride: null,
-        federationHops: 0,
-      };
+    const {
+      depth,
+      timeoutSecOverride,
+      bypassConcurrencyCap,
+      policyOverride,
+      federationHops,
+      priority,
+    } = params ?? {
+      depth: 0,
+      timeoutSecOverride: null,
+      bypassConcurrencyCap: false,
+      policyOverride: null,
+      federationHops: 0,
+      priority: 'normal' as const,
+    };
 
     const run = this.store.getRun(runId);
     if (!run || run.status !== 'queued') return;
@@ -395,6 +489,7 @@ export class RunEngine {
     const entry: ActiveRun = {
       abort: new AbortController(),
       depth,
+      priority,
       report: null,
       cancelStatus: null,
       stderrTail: '',
@@ -935,6 +1030,7 @@ export class RunEngine {
         agents: this.agents,
         bus: this.bus,
         engine: this,
+        skills: this.skills,
         maxAgentDepth: () => settings.maxAgentDepth,
         federation: this.federation,
       },
@@ -1011,6 +1107,17 @@ export class RunEngine {
     );
     if (ragServer) mcpServers.rag = ragServer;
 
+    const sandboxSettings = buildSandboxSettings(agent.sandbox, { dataDir: this.config.dataDir });
+    const sandboxNote = describeSandbox(sandboxSettings);
+    if (sandboxNote) {
+      // Un confinement actif change ce que l'agent peut faire : le taire rendrait
+      // incompréhensible une commande qui échoue faute de réseau.
+      this.bus.log('info', 'runs', `Run ${run.id} : ${sandboxNote}`, {
+        agentId: agent.id,
+        runId: run.id,
+      });
+    }
+
     // Note : les outils mcp__maestro__* ne sont PAS mis dans allowedTools — une
     // entrée nue y court-circuiterait canUseTool ; le broker les autorise déjà.
     const options: Options = {
@@ -1036,6 +1143,22 @@ export class RunEngine {
         ? { disallowedTools: agent.disallowedTools }
         : {}),
       ...(agent.maxTurns ? { maxTurns: agent.maxTurns } : {}),
+      /*
+       * Confinement, quand l'agent en a un.
+       *
+       * Étalé conditionnellement et non passé à `undefined` : un agent sans bac
+       * à sable doit produire exactement les options d'avant, sans clé
+       * supplémentaire dont le SDK pourrait un jour tirer un comportement.
+       */
+      ...(sandboxSettings ? { sandbox: sandboxSettings } : {}),
+      /*
+       * La session à reprendre appartient à la **tentative**, pas au run.
+       *
+       * C'est la différence qu'introduit le repli multi-comptes : une seconde
+       * tentative s'exécute sur un autre compte, donc une autre session. Passer
+       * `run.sessionId` ferait reprendre chez B une session ouverte chez A, que
+       * B ne connaît pas — et la reprise échouerait sans dire pourquoi.
+       */
       ...(attempt.resumeSessionId ? { resume: attempt.resumeSessionId } : {}),
       abortController: entry.abort,
       stderr: (data: string) => {
@@ -1045,6 +1168,20 @@ export class RunEngine {
         this.handlePermission(run.id, agent, toolName, input, forcedApproval),
       env: { ...attempt.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'maestro/0.1.0' },
     };
+
+    /*
+     * Longueurs de capture.
+     *
+     * Le transcript sert d'abord à être lu à l'écran, d'où des retours d'outils
+     * raccourcis. Mais ces mêmes événements sont la matière première des
+     * trajectoires d'entraînement, et une observation coupée y devient une
+     * erreur d'étiquetage : le modèle apprend à s'arrêter au milieu d'un
+     * résultat. Le réglage lève donc la limite, sans la supprimer — une borne
+     * haute reste indispensable, un `find /` produit des mégaoctets.
+     */
+    const fullCapture = settings.fullTrajectoryCapture;
+    const toolResultLimit = fullCapture ? FULL_TOOL_RESULT_LIMIT : TOOL_RESULT_LIMIT;
+    const thinkingLimit = fullCapture ? FULL_THINKING_LIMIT : THINKING_LIMIT;
 
     let cumulatedTokens = 0;
     let gotResult = false;
@@ -1078,7 +1215,7 @@ export class RunEngine {
             if (block.type === 'text' && block.text.trim()) {
               this.emitEvent(run, 'assistant_text', { text: block.text });
             } else if (block.type === 'thinking' && block.thinking.trim()) {
-              this.emitEvent(run, 'thinking', { text: truncate(block.thinking, 2000) });
+              this.emitEvent(run, 'thinking', { text: truncate(block.thinking, thinkingLimit) });
             } else if (block.type === 'tool_use') {
               this.emitEvent(run, 'tool_use', {
                 toolName: block.name,
@@ -1105,7 +1242,7 @@ export class RunEngine {
                 this.emitEvent(run, 'tool_result', {
                   toolUseId: block.tool_use_id,
                   isError: block.is_error ?? false,
-                  text: truncate(textPart, 1500),
+                  text: truncate(textPart, toolResultLimit),
                 });
               }
             }

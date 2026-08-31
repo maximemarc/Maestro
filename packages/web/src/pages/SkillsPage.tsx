@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import type { AgentConfig, SkillDef, SkillScope } from '@maestro/shared';
-import { api } from '../lib/api';
+import { api, downloadSkill } from '../lib/api';
 import { useStore } from '../lib/store';
 import {
   ArrowSquareOut,
@@ -103,6 +103,17 @@ function SkillCard(props: {
         <button className="btn sm" onClick={props.onUse}>
           <Play />
           Utiliser
+        </button>
+        {/* Export au format ouvert SKILL.md : c'est ce qui permet de republier
+            une skill ailleurs — dépôt, hub communautaire. L'import existait
+            déjà, l'interopérabilité n'allait que dans un sens. */}
+        <button
+          className="btn ghost sm"
+          onClick={() => void downloadSkill(skill.id)}
+          title="Télécharger au format SKILL.md"
+        >
+          <DownloadSimple />
+          Exporter
         </button>
         {props.onDelete && (
           <ConfirmButton

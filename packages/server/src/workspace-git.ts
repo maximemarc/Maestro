@@ -49,15 +49,21 @@ export class WorkspaceGitError extends Error {}
 async function git(
   dir: string,
   args: string[],
-  options: { tolerateExitCode?: number } = {},
+  options: { tolerateExitCode?: number; includeStderr?: boolean } = {},
 ): Promise<string> {
   try {
-    const { stdout } = await run('git', ['-C', dir, ...args], {
+    const { stdout, stderr } = await run('git', ['-C', dir, ...args], {
       maxBuffer: MAX_BUFFER,
       timeout: TIMEOUT_MS,
       windowsHide: true,
     });
-    return stdout;
+    /*
+     * `git push` écrit sur stderr — les lignes « remote: » comprises, dont
+     * celle qui porte l'URL de création de merge request. Lire stdout seul
+     * n'aurait jamais rien trouvé, et l'absence de lien serait passée pour un
+     * dépôt sans forge.
+     */
+    return options.includeStderr ? `${stdout}\n${stderr}` : stdout;
   } catch (err) {
     if (
       options.tolerateExitCode !== undefined &&
@@ -377,6 +383,72 @@ export async function commitToBranch(
     .split('\n')
     .filter(Boolean).length;
   return { branch: options.branch, sha, files: count };
+}
+
+/** Résultat d'une publication de branche. */
+export interface PushResult {
+  branch: string;
+  remote: string;
+  /** Lien de création de merge request, quand on a su le déterminer. */
+  mergeRequestUrl: string | null;
+}
+
+/**
+ * Lit l'URL de création de MR proposée par la forge.
+ *
+ * GitLab et GitHub l'écrivent tous deux dans la sortie de `git push`, préfixée
+ * de `remote:`. La lire plutôt que la fabriquer évite d'avoir à connaître la
+ * forge, son domaine, le chemin du projet et sa convention d'URL — et c'est la
+ * forge elle-même qui la donne, donc elle est juste par construction.
+ */
+export function mergeRequestUrlFrom(pushOutput: string): string | null {
+  const match = /https?:\/\/\S*(?:merge_requests\/new|\/compare\/|\/pull\/new\/)\S*/.exec(
+    pushOutput,
+  );
+  // Les sorties git terminent souvent par de la ponctuation collée à l'URL.
+  return match ? match[0].replace(/[.,)\]]+$/, '') : null;
+}
+
+/**
+ * Publie une branche sur le dépôt distant.
+ *
+ * Aucun jeton de forge n'est demandé : le `push` emprunte les identifiants déjà
+ * configurés sur la machine, ceux dont l'utilisateur se sert lui-même. Créer la
+ * merge request par API aurait exigé un jeton, l'URL de l'instance et le chemin
+ * du projet — trois choses que Maestro n'a pas, pour un gain nul puisque la
+ * forge propose déjà le lien.
+ *
+ * 🔒 On ne pousse jamais que la branche demandée, et jamais en force.
+ */
+export async function pushBranch(
+  dir: string,
+  options: { branch: string; remote?: string },
+): Promise<PushResult> {
+  if (!(await isRepo(dir))) throw new WorkspaceGitError("Ce répertoire n'est pas un dépôt git.");
+  const remote = options.remote ?? 'origin';
+
+  const remotes = (await git(dir, ['remote'])).split('\n').map((r) => r.trim());
+  if (!remotes.includes(remote)) {
+    throw new WorkspaceGitError(
+      `Aucun dépôt distant « ${remote} » : la branche reste locale. ` +
+        `Ajoute-le avec « git remote add ${remote} <url> ».`,
+    );
+  }
+
+  const exists = await git(dir, ['rev-parse', '--verify', options.branch]).catch(() => '');
+  if (!exists.trim()) {
+    throw new WorkspaceGitError(`Branche introuvable : ${options.branch}`);
+  }
+
+  /*
+   * `--set-upstream` et rien d'autre. Pas de `--force`, pas de `--all` : une
+   * branche fabriquée par un agent n'a aucun privilège particulier, et écraser
+   * un historique distant n'est jamais une opération que Maestro décide seul.
+   */
+  const output = await git(dir, ['push', '--set-upstream', remote, options.branch], {
+    includeStderr: true,
+  });
+  return { branch: options.branch, remote, mergeRequestUrl: mergeRequestUrlFrom(output) };
 }
 
 /**

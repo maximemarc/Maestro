@@ -22,7 +22,9 @@ import {
   changes,
   commitToBranch,
   isRepo,
+  mergeRequestUrlFrom,
   patch,
+  pushBranch,
   snapshot,
 } from './workspace-git.ts';
 
@@ -240,5 +242,91 @@ describe('diff des fichiers neufs', () => {
     expect(result.diff).toContain('+ligne deux');
     expect(result.diff).toContain('+contenu neuf');
     expect(result.files).toHaveLength(2);
+  });
+});
+
+describe('lien de merge request', () => {
+  /*
+   * GitLab et GitHub écrivent tous deux ce lien dans la sortie du push. Le lire
+   * plutôt que le fabriquer évite de connaître la forge, son domaine et sa
+   * convention d'URL — et il est juste par construction, puisqu'il vient d'elle.
+   */
+  it('lit le lien proposé par GitLab', () => {
+    const sortie = [
+      'remote:',
+      'remote: To create a merge request for ma-branche, visit:',
+      'remote:   https://gitlab.cneidf.net/equipe/projet/-/merge_requests/new?merge_request%5Bsource_branch%5D=ma-branche',
+      'remote:',
+    ].join('\n');
+    expect(mergeRequestUrlFrom(sortie)).toContain('/-/merge_requests/new');
+  });
+
+  it('lit le lien proposé par GitHub', () => {
+    const sortie =
+      'remote: Create a pull request for ma-branche on GitHub by visiting:\n' +
+      'remote:      https://github.com/org/depot/pull/new/ma-branche\n';
+    expect(mergeRequestUrlFrom(sortie)).toBe('https://github.com/org/depot/pull/new/ma-branche');
+  });
+
+  it('retire la ponctuation collée à l’URL', () => {
+    expect(mergeRequestUrlFrom('visitez https://forge.fr/p/-/merge_requests/new.')).toBe(
+      'https://forge.fr/p/-/merge_requests/new',
+    );
+  });
+
+  it('rend null quand la forge ne propose rien', () => {
+    expect(mergeRequestUrlFrom('To /srv/depot.git\n * [new branch] x -> x')).toBeNull();
+  });
+});
+
+describe('publication de branche', () => {
+  /** Dépôt nu servant de distant, pour pousser pour de vrai. */
+  let remoteDir: string;
+
+  beforeEach(() => {
+    remoteDir = mkdtempSync(join(tmpdir(), 'maestro-remote-'));
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', remoteDir], {
+      encoding: 'utf8',
+    });
+  });
+
+  afterEach(() => {
+    rmSync(remoteDir, { recursive: true, force: true });
+  });
+
+  it('refuse quand aucun distant n’est configuré', async () => {
+    write('neuf.txt', 'x');
+    await commitToBranch(dir, { branch: 'maestro/essai', message: 'essai' });
+    await expect(pushBranch(dir, { branch: 'maestro/essai' })).rejects.toThrow(/distant/);
+  });
+
+  it('refuse une branche inexistante', async () => {
+    g('remote', 'add', 'origin', remoteDir);
+    await expect(pushBranch(dir, { branch: 'maestro/fantome' })).rejects.toThrow(/introuvable/);
+  });
+
+  it('pousse la branche et la rend visible sur le distant', async () => {
+    g('remote', 'add', 'origin', remoteDir);
+    write('neuf.txt', 'contenu\n');
+    await commitToBranch(dir, { branch: 'maestro/livraison', message: 'livraison' });
+
+    const result = await pushBranch(dir, { branch: 'maestro/livraison' });
+    expect(result.branch).toBe('maestro/livraison');
+    expect(result.remote).toBe('origin');
+
+    const distant = execFileSync('git', ['-C', remoteDir, 'branch', '--list'], {
+      encoding: 'utf8',
+    });
+    expect(distant).toContain('maestro/livraison');
+  });
+
+  /* Un dépôt nu local ne propose aucun lien : l'absence doit se lire comme
+     « pas de forge », pas comme une erreur. */
+  it('rend un lien nul quand le distant n’en propose pas', async () => {
+    g('remote', 'add', 'origin', remoteDir);
+    write('neuf.txt', 'contenu\n');
+    await commitToBranch(dir, { branch: 'maestro/sans-lien', message: 'x' });
+    const result = await pushBranch(dir, { branch: 'maestro/sans-lien' });
+    expect(result.mergeRequestUrl).toBeNull();
   });
 });

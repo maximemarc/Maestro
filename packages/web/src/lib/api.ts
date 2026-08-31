@@ -2,12 +2,14 @@
  * Client REST typé. Le jeton est conservé en localStorage ('maestro_token').
  */
 import type {
+  AccessToken,
   AgentConfig,
   ConnectorInstallAgentRequest,
   ConnectorInstallPluginRequest,
   ConnectorInstallRequest,
   ConnectorSearchQuery,
   McpImportCandidate,
+  McpPreset,
   McpProbeResult,
   McpServerDef,
   McpToolTrial,
@@ -46,6 +48,14 @@ import type {
   StartRunRequest,
   TmuxSessionInfo,
   TokensByBucket,
+  BatchComparison,
+  ToolCallDialectInfo,
+  Trajectory,
+  TrainingBatch,
+  TrainingBatchSpec,
+  TrainingExportPreview,
+  TrainingExportRequest,
+  TrainingItem,
   UpsertSkillRequest,
   AccountUsage,
   Beat,
@@ -146,6 +156,93 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return data as T;
 }
 
+/** État de l'entretien : taille de la base, rétention, sauvegardes. */
+export interface MaintenanceState {
+  databaseBytes: number;
+  retentionDays: number | null;
+  backups: Array<{ name: string; bytes: number; createdAt: string }>;
+}
+
+export interface BackupReport {
+  path: string;
+  bytes: number;
+  rotated: string[];
+}
+
+export interface PruneReport {
+  applied: boolean;
+  cutoff: string | null;
+  deletedEvents: number;
+  deletedLogs: number;
+  bytesBefore: number;
+  bytesAfter: number;
+}
+
+/** Corps accepté par l'API pour créer ou modifier un lot d'entraînement. */
+export interface TrainingBatchInput {
+  name: string;
+  description?: string;
+  spec: TrainingBatchSpec;
+}
+
+/**
+ * Télécharge un jeu de données au format JSONL.
+ *
+ * Comme le patch d'un run : la réponse n'est pas du JSON, et un `<a href>`
+ * n'emporterait pas l'en-tête d'authentification. D'où le POST puis le Blob.
+ */
+export async function downloadTrainingExport(input: TrainingExportRequest): Promise<number> {
+  const res = await fetch('/api/training/export', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}),
+    },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(res.status, data?.error ?? `Erreur HTTP ${res.status}`);
+  }
+  const body = await res.text();
+  const blob = new Blob([body], { type: 'application/x-ndjson' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `maestro-${input.format}.jsonl`;
+  link.click();
+  URL.revokeObjectURL(url);
+  // Le nombre de lignes : sans lui, l'utilisateur ne sait pas si le fichier
+  // téléchargé contient mille trajectoires ou aucune.
+  return body ? body.trimEnd().split('\n').length : 0;
+}
+
+/**
+ * Télécharge une skill au format ouvert SKILL.md.
+ *
+ * Comme le patch d'un run : la réponse n'est pas du JSON et un `<a href>` nu
+ * n'emporterait pas l'en-tête d'authentification, le jeton vivant en
+ * localStorage et non en cookie.
+ */
+export async function downloadSkill(id: string): Promise<void> {
+  const res = await fetch(`/api/skills/export?id=${encodeURIComponent(id)}`, {
+    headers: { ...(getToken() ? { authorization: `Bearer ${getToken()}` } : {}) },
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw new ApiError(res.status, data?.error ?? `Erreur HTTP ${res.status}`);
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  /* Le nom vient de l'identifiant, pas de l'en-tête : lire content-disposition
+     demanderait de le décoder à la main pour un gain nul. */
+  link.download = `${id.split(':').pop() ?? 'skill'}.md`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 /**
  * Télécharge le patch d'un run.
  *
@@ -209,6 +306,12 @@ export const api = {
   runBranchName: (id: string) => request<{ branch: string }>('GET', `/api/runs/${id}/branch-name`),
   createRunBranch: (id: string, input: { branch: string; message?: string }) =>
     request<CommitResult>('POST', `/api/runs/${id}/branch`, input),
+  pushRunBranch: (id: string, input: { branch: string; remote?: string }) =>
+    request<{ branch: string; remote: string; mergeRequestUrl: string | null }>(
+      'POST',
+      `/api/runs/${id}/push`,
+      input,
+    ),
 
   // Approbations
   listApprovals: (status?: string) =>
@@ -355,6 +458,61 @@ export const api = {
   runStats: (days = 7) => request<RunStats>('GET', `/api/metrics/runs?days=${days}`),
   tokensBy: (groupBy: 'day' | 'agent' | 'model', days = 30) =>
     request<TokensByBucket[]>('GET', `/api/metrics/tokens?groupBy=${groupBy}&days=${days}`),
+
+  compareTrainingBatches: (baseline: string, candidate: string) =>
+    request<BatchComparison>(
+      'GET',
+      `/api/training/compare?baseline=${encodeURIComponent(baseline)}&candidate=${encodeURIComponent(candidate)}`,
+    ),
+
+  // Jetons d'accès nommés
+  listAccessTokens: () => request<AccessToken[]>('GET', '/api/access-tokens'),
+  createAccessToken: (label: string) =>
+    request<{ token: AccessToken; value: string }>('POST', '/api/access-tokens', { label }),
+  revokeAccessToken: (id: string) =>
+    request<{ ok: boolean }>('POST', `/api/access-tokens/${id}/revoke`),
+
+  // Entretien de la base
+  getMaintenance: () => request<MaintenanceState>('GET', '/api/maintenance'),
+  runBackup: () => request<BackupReport>('POST', '/api/maintenance/backup'),
+  runPrune: () => request<PruneReport>('POST', '/api/maintenance/prune'),
+
+  // Catalogue MCP
+  listMcpPresets: () => request<McpPreset[]>('GET', '/api/mcp-presets'),
+  installMcpPreset: (slug: string, input: { env?: Record<string, string>; args?: string[] }) =>
+    request<McpServerDef>('POST', `/api/mcp-presets/${slug}/install`, input),
+
+  // Entraînement (MLOps)
+  listToolCallDialects: () => request<ToolCallDialectInfo[]>('GET', '/api/training/dialects'),
+  listTrainingBatches: () => request<TrainingBatch[]>('GET', '/api/training/batches'),
+  createTrainingBatch: (input: TrainingBatchInput) =>
+    request<TrainingBatch>('POST', '/api/training/batches', input),
+  updateTrainingBatch: (id: string, patch: Partial<TrainingBatchInput>) =>
+    request<TrainingBatch>('PATCH', `/api/training/batches/${id}`, patch),
+  deleteTrainingBatch: (id: string) =>
+    request<{ ok: boolean }>('DELETE', `/api/training/batches/${id}`),
+  getTrainingBatch: (id: string) =>
+    request<{
+      batch: TrainingBatch;
+      items: TrainingItem[];
+      itemsTruncated: boolean;
+      itemTotal: number;
+    }>('GET', `/api/training/batches/${id}`),
+  startTrainingBatch: (id: string) =>
+    request<TrainingBatch>('POST', `/api/training/batches/${id}/start`),
+  pauseTrainingBatch: (id: string) =>
+    request<{ ok: boolean }>('POST', `/api/training/batches/${id}/pause`),
+  cancelTrainingBatch: (id: string) =>
+    request<{ ok: boolean }>('POST', `/api/training/batches/${id}/cancel`),
+  scoreTrainingItem: (id: string, score: number) =>
+    request<TrainingItem>('POST', `/api/training/items/${id}/score`, { score }),
+  getTrajectory: (runId: string, thinking = false) =>
+    request<Trajectory>(
+      'GET',
+      `/api/training/runs/${runId}/trajectory${thinking ? '?thinking=1' : ''}`,
+    ),
+  previewTrainingExport: (input: TrainingExportRequest) =>
+    request<TrainingExportPreview>('POST', '/api/training/export/preview', input),
 
   // Paramètres
   getSettings: () => request<Settings>('GET', '/api/settings'),

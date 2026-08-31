@@ -171,6 +171,17 @@ tombe, et d'exécuter ailleurs que chez Anthropic.
 - Éditeur intégré ; matérialisation automatique au format natif Claude Code
   (`.claude/skills/<slug>/SKILL.md`) dans le workspace de chaque agent
 - « Utiliser » : lance un run agent + skill + demande
+- **Les agents écrivent leurs propres skills** via l'outil MCP `skill_save` :
+  une méthode non triviale trouvée pendant un run est consignée et disponible au
+  suivant. La mémoire retenait un fait, rien ne retenait une démarche.
+  🔒 Portée agent uniquement — écrire une skill globale changerait le
+  comportement de tous les autres agents à leur insu ; la promotion reste un
+  geste humain
+- **Format ouvert dans les deux sens** : le `SKILL.md` de Maestro (frontmatter
+  `name` / `description` puis markdown) est celui de Claude Code et des hubs
+  communautaires. L'import depuis un dépôt distant existait ; l'export d'une
+  skill, pour la republier ailleurs, s'ajoute — y compris pour une skill écrite
+  par un agent
 
 ### MCP — serveurs déclarés et outils maison
 
@@ -372,6 +383,68 @@ savoir qu'il l'a déjà créée.
   d'abonnement, relire sur un autre outil, synthétiser sur une API bon marché,
   sans dupliquer les agents
 
+### Entraînement — jeux de données à partir du travail des agents
+
+Chaque run laisse derrière lui une suite d'événements : consigne, texte, appels
+d'outils, observations, réponse. C'est exactement la forme d'une trajectoire
+d'entraînement. Maestro sait donc les relire, en fabriquer en série, et les
+exporter au format d'un outil de fine-tuning.
+
+**Lots de génération**
+
+- Un lot décrit des gabarits de prompt (`{{variable}}` substitué), des jeux de
+  valeurs, un nombre d'échantillons et une **distribution d'outils** pondérée —
+  de quoi déséquilibrer volontairement un corpus (70 % de lectures, 30 %
+  d'écritures)
+- Le tirage est **reproductible** : la graine dérive de l'identifiant du lot et
+  de l'index de l'échantillon, donc relancer un lot ne change pas son plan
+- **Checkpointing par échantillon** : l'état est écrit à chaque transition, pas
+  à la fin. Un arrêt brutal au millième échantillon ne coûte que celui-là, et le
+  lot reprend seul au démarrage suivant
+- Pause, reprise, annulation, tentatives multiples par échantillon
+- ⚠️ Le parallélisme vient du **pool d'agents**, pas d'un nombre de workers : un
+  agent n'exécute jamais deux runs à la fois, son workspace est unique. Un lot
+  confié à quatre agents produit quatre trajectoires de front, pas davantage
+
+**Notation (récompense)**
+
+- Un **agent juge** facultatif note chaque trajectoire entre 0 et 1 ; la note
+  peut être corrigée à la main dans l'interface
+- Sans note, un export destiné au renforcement n'a aucun signal : les
+  trajectoires non notées sont écartées, en le disant
+
+**Export**
+
+- Formats : **ShareGPT** (Axolotl, LLaMA-Factory, Unsloth), **OpenAI**
+  (`messages` + `tool_calls` natifs), **Atropos** (rollouts scorés pour
+  l'apprentissage par renforcement), **brut** (la forme canonique, sans perte)
+- **Onze dialectes d'appels d'outils** — Hermes/ChatML, OpenAI, Mistral, Llama 3
+  (JSON et balise python), pythonic, DeepSeek, Command R, Granite, Functionary,
+  JSON par ligne. Exporter dans la mauvaise convention apprend au modèle une
+  syntaxe qu'il n'émettra jamais ; chaque dialecte est vérifié par un
+  aller-retour rendu → lecture
+- **Compression sous budget de tokens**, par ordre croissant de dégât : la
+  réflexion d'abord, puis les retours d'outils les plus longs, et seulement en
+  dernier recours des tours entiers — la première consigne et la réponse finale
+  ne sont jamais sacrifiées, et appels et observations restent appariés
+- Sortie en **JSONL**, une trajectoire par ligne. L'aperçu dit combien sont
+  retenues, lesquelles sont écartées et pourquoi, avant d'écrire un fichier
+- La source peut être un lot **ou les runs récents de l'instance** : le travail
+  réel fait souvent les meilleures trajectoires
+
+> 🔒 **Un jeu de données exporté contient les prompts et les retours d'outils
+> intégraux.** S'ils portent sur des dossiers réels, ce sont des données
+> personnelles en clair — noms, SIRET, montants nominatifs, extraits de liasse.
+> Le fichier quitte Maestro et part généralement ailleurs (dépôt de fine-tuning,
+> service d'entraînement tiers) : le relire avant de le transmettre, et
+> pseudonymiser si le corpus doit sortir de l'entreprise.
+
+> ⚠️ Par défaut un retour d'outil est raccourci à 1 500 caractères — le
+> transcript est fait pour être lu. Pour de l'entraînement, ce raccourci devient
+> une erreur d'étiquetage. Le réglage **« Capture intégrale des retours
+> d'outils »** (Paramètres) porte la limite à 60 000 caractères, au prix d'une
+> base plus volumineuse, et ne s'applique qu'aux runs suivants.
+
 ### Délégation inter-agents
 
 - Outil MCP `maestro_send_to_agent` : un agent confie une sous-tâche à un autre
@@ -393,55 +466,40 @@ savoir qu'il l'a déjà créée.
   - 🔒 Le jeton d'un pair est traité comme une clé de fournisseur : la base ne
     garde que le **nom de la variable d'environnement** qui le porte.
 
-### Canaux — Telegram, Slack, webhooks
+### Messagerie — Telegram, Discord, Slack
 
-Un **canal** relie Maestro à un endroit où des humains regardent. Un message y
-circule sous forme **structurée** — titre, faits, corps, actions — et chaque
-canal le rend selon ses moyens. C'est ce qui permet d'en ajouter un sans
-recopier la logique : décider qu'un run mérite une notification, lister les
-agents, lancer un run depuis un message n'a jamais rien eu de telegramien.
+Les trois canaux répondent aux mêmes commandes : `/agents`, `/status`,
+`/approvals`, `/run <agent> <prompt>`. La logique est partagée
+(`chat-commands.ts`) et seul le rendu diffère — HTML pour Telegram, markdown pour
+Discord, mrkdwn pour Slack ; une commande corrigée l'est sur les trois.
 
-- **Telegram** — bidirectionnel : notifications de fin de run, **approbations par
-  boutons**, `/run <agent> <prompt>`, `/status`, `/agents`, `/approvals`.
-  Whitelist stricte de chats (`TELEGRAM_CHAT_IDS`).
-- **Slack** — bidirectionnel : notifications en blocs, `/maestro status`,
-  `/maestro run <agent> <prompt>`, et **approbations par boutons**. Whitelist
-  stricte de salons (`SLACK_CHANNEL_IDS`). Les deux sens sont indépendants — un
-  espace de travail peut piloter Maestro sans installer de bot émetteur, les
-  réponses partant par le `response_url` de la requête.
-- **Webhook sortant** — Discord, Mattermost, ou tout point d'entrée acceptant du
-  JSON (`MAESTRO_WEBHOOK_URL`). Sans dépendance ni bot à déclarer.
+- **Telegram** — bot bidirectionnel, notifications de fin de run et
+  **approbations résolues par boutons**, directement dans la conversation
+- **Discord** — Gateway WebSocket, sans dépendance. ⚠️ L'intent privilégié
+  « Message Content » doit être activé dans le portail développeur, faute de quoi
+  les messages arrivent sans texte ; Maestro le détecte et le dit dans ses
+  journaux plutôt que de rester muet
+- **Slack** — Socket Mode, et non l'API Events : celle-ci exigerait une URL
+  publique que Slack appelle. Maestro étant fait pour tourner derrière un
+  pare-feu, c'est lui qui se connecte. Deux jetons distincts : `xapp-` ouvre la
+  socket, `xoxb-` poste
+- 🔒 **Liste blanche stricte et obligatoire** sur les trois canaux : un jeton sans
+  liste laisse la passerelle inactive, et le démarrage le signale. Un bot qui
+  répond partout exécute des agents pour n'importe qui
+- Les approbations ne se résolvent par boutons que sur Telegram : Discord et
+  Slack exigeraient un point d'entrée HTTP public pour recevoir les
+  interactions. Sur ces deux canaux, la demande est notifiée et renvoie vers
+  l'interface
 
-Ils se complètent plus qu'ils ne se ressemblent, et la différence est portée par
-l'interface : un canal **interactif** rend les actions cliquables, un canal
-sortant seul ne le peut pas — il les mentionne alors en texte, parce qu'une
-approbation qui attend sans qu'on sache où la résoudre est pire qu'une
-notification absente.
+- **Webhook sortant** — Mattermost, ou tout point d'entrée acceptant du JSON
+  (`MAESTRO_WEBHOOK_URL`). Sans bot à déclarer, sans réception.
 
-Slack a servi à éprouver l'abstraction dans la seule direction qui n'avait
-jamais été testée deux fois : la réception. Et elle a tenu — `parseCommand`,
-`runCommand` et `parseApprovalAction` sont repris tels quels, le fichier Slack ne
-contenant que du transport. Un canal sortant de plus n'aurait validé que la
-moitié du contrat.
-
-> 🔒 **La route entrante de Slack est publique, et c'est sans alternative.**
-> Telegram va chercher ses messages : rien n'est exposé. Slack pousse les siens
-> vers une URL qui doit être joignable sans le jeton Maestro — Slack ne le
-> connaît pas et ne peut pas l'apprendre. La **signature HMAC est donc la seule
-> authentification** de `POST /hooks/slack`, d'où trois règles qui ne se
-> négocient pas : sans `SLACK_SIGNING_SECRET` la route **n'existe pas** (aucun
-> mode « ouvert pour tester ») ; un horodatage de plus de cinq minutes est
-> rejeté, sinon une requête valide capturée serait rejouable indéfiniment ; la
-> comparaison est à temps constant, parce qu'un `===` sur un HMAC laisse fuir la
-> signature attendue octet par octet. Et comme pour Telegram, la whitelist
-> s'applique dans les deux sens : une signature valide prouve que Slack parle,
-> pas que la personne a le droit de lancer un run.
-
-> 🔒 **Les réponses aux commandes sont éphémères** — visibles de la seule
-> personne qui a tapé la commande. Ce n'est pas du confort : la sortie d'un run
-> peut porter du code ou des données de dossier, et la déverser dans un salon
-> serait une publication que personne n'a demandée. Les notifications, elles,
-> restent publiques : c'est leur raison d'être.
+Les quatre canaux passent par un **registre** : un seul abonnement au bus et une
+seule règle « faut-il notifier ». Les passerelles s'abonnaient chacune de son
+côté, avec sa propre version de la règle — et les versions avaient divergé, celle
+de Slack ignorant les routines que Telegram honorait. Un message est une
+structure de spans décrivant l'intention (emphase, code) et non du balisage :
+c'est ce qui permet aux quatre rendus de rester justes sans se recopier.
 
 > 🔒 **Envoyer vers un service tiers, c'est publier.** Le résultat d'un run peut
 > contenir du code, des extraits de dossier, des noms de clients. Le webhook
@@ -449,6 +507,83 @@ moitié du contrat.
 > résultat demande `MAESTRO_WEBHOOK_DETAIL=full` : un choix explicite, pas un
 > défaut qu'on subit. L'URL d'un webhook est elle-même un secret — elle reste en
 > variable d'environnement et n'apparaît dans aucun journal.
+
+### Banc de non-régression
+
+Modifier le CLAUDE.md d'un agent ou son modèle était un acte de foi. Rejoue le
+même jeu de prompts avant et après, puis compare les deux lots : l'écart se lit
+cas par cas — score, mais aussi coût, parce qu'un agent qui gagne deux centièmes
+en doublant sa facture n'est pas une amélioration.
+
+- Appariement **sur le prompt**, jamais sur l'index : deux lots sans prompt
+  commun sont refusés plutôt que comparés à tort
+- Un écart inférieur à 0,05 est déclaré stable — un juge ne rend pas deux fois
+  la même note, et voir des progrès dans le bruit ferait décider à tort
+- Un échantillon non noté est « incomparable », pas « stable » : le ranger dans
+  les stables masquerait la régression qu'on cherche
+
+### Exploitation
+
+- **Rétention** des transcripts et du journal, en jours. Illimitée par défaut :
+  l'activer détruit des données, c'est une décision qu'on prend sur un chiffre —
+  la taille réelle de la base est affichée à côté du réglage
+- **Sauvegarde à chaud** (`VACUUM INTO`), depuis l'interface ou en ligne de
+  commande (`npm run backup`), rotation sur sept. 🔒 Une sauvegarde contient tout,
+  clés MCP comprises : le répertoire est en 0700
+- **Métriques Prometheus** sur `/api/metrics/prometheus` — file d'attente,
+  approbations en attente, coût du jour, taille de la base
+- **Priorité de file** : un lot d'entraînement ne peut jamais prendre la
+  dernière place du plafond de concurrence. La priorité se déduit de l'origine,
+  parce que c'est elle qui dit si quelqu'un attend devant son écran
+
+### Confinement d'un agent
+
+Optionnel et par agent : `sandbox: null` par défaut, et ne rien régler laisse
+Maestro se comporter exactement comme avant. C'est une décision prise pour un
+agent dont on n'est pas sûr, pas un péage que tous les autres paient.
+
+Le bac à sable est celui de Claude Code — isolation du système de fichiers par
+chemin, egress réseau filtré, seccomp — appliqué aux commandes que l'agent
+lance. Plus fin qu'un conteneur : la session continue de parler à l'API pendant
+que les commandes, elles, restent enfermées.
+
+> ⚠️ **Prérequis système : `bubblewrap` et `socat`.** Sans eux, le bac à sable ne
+> peut pas démarrer :
+>
+> ```
+> sudo apt install bubblewrap socat
+> ```
+>
+> Deux comportements, selon le réglage **« Exiger le confinement »** :
+>
+> - **décoché** (défaut) — l'agent tourne **sans confinement**, avec un
+>   avertissement au journal. Pratique, mais il faut le savoir : le réglage est
+>   actif dans l'interface alors que rien ne confine ;
+> - **coché** — le run **échoue** en nommant les dépendances manquantes. C'est le
+>   bon choix pour un agent précisément jugé risqué, où « dégradé en silence »
+>   est le pire des cas.
+
+🔒 Le jeton d'accès et la base de Maestro sont toujours illisibles depuis un
+agent confiné, quelle que soit la configuration : les lire suffirait à se faire
+lancer un run non confiné, et le confinement s'annulerait lui-même en une
+commande.
+
+Pour une frontière plus dure autour de l'instance entière, le `Dockerfile` et le
+`docker-compose.yml` fournis sont durcis (racine en lecture seule, capacités
+retirées, plafonds de processus, de mémoire et de CPU). Ils restent un chemin
+optionnel : `npm start` fonctionne sans.
+
+### Accès et traçabilité
+
+- **Jetons nommés** : un par personne ou par script, révocables
+  individuellement et avec effet immédiat. Une approbation dit désormais _qui_ a
+  tranché, et plus seulement par quel canal
+- 🔒 Seule l'empreinte SHA-256 est stockée — un vol de base ne donne aucun accès,
+  et c'est pourquoi la valeur n'est montrée qu'une fois
+- 🔒 **Secrets des serveurs MCP chiffrés au repos** (AES-256-GCM), clé dans un
+  fichier séparé : la clé et la base ne voyagent pas ensemble
+- Le jeton principal reste hors de portée de la révocation : c'est lui qui
+  permet de reprendre la main
 
 ### Analytique & garde-fous
 
@@ -692,7 +827,16 @@ packages/
 │   ├── kanban.ts        Cartes + transitions automatiques liées aux runs
 │   ├── scheduler.ts     Routines cron (croner)
 │   ├── pipelines.ts     Chaînes d'agents séquentielles
+│   ├── training.ts      Lots de génération : workers, checkpoint, notation
+│   ├── training-trajectory.ts  Run → trajectoire canonique, compression
+│   ├── training-parsers.ts     11 dialectes d'appels d'outils (rendu + lecture)
+│   ├── training-export.ts      ShareGPT / OpenAI / Atropos / brut, en JSONL
+│   ├── sandbox.ts       Confinement par agent (bac à sable Claude Code)
+│   ├── mcp-presets.ts   Catalogue de serveurs MCP prêts à déclarer
+│   ├── chat-commands.ts Commandes de messagerie, communes aux trois canaux
 │   ├── telegram.ts      Bot long-polling (zéro dépendance)
+│   ├── discord.ts       Gateway WebSocket v10 (zéro dépendance)
+│   ├── slack.ts         Socket Mode (zéro dépendance)
 │   └── tmux.ts          Sessions attachables
 └── web/      React 19 · Vite · zustand · d3-force — thème « mission control »
 ```
@@ -702,7 +846,7 @@ packages/
 `task.updated`, `metrics.tick`…) qui tient l'interface à jour.
 
 **Outils MCP exposés à chaque agent** (`mcp__maestro__*`) :
-`task_create`, `task_update`, `send_to_agent`, `memory_save`, `report`.
+`task_create`, `task_update`, `send_to_agent`, `memory_save`, `skill_save`, `report`.
 
 ## Sécurité
 

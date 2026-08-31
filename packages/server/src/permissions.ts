@@ -74,6 +74,7 @@ export class ApprovalBroker {
       input,
       status: 'pending',
       resolvedBy: null,
+      resolvedByLabel: null,
       note: null,
       requestedAt: nowIso(),
       resolvedAt: null,
@@ -118,6 +119,8 @@ export class ApprovalBroker {
     decision: ApprovalDecision,
     resolvedBy: ApprovalResolver,
     note: string | null,
+    /** Nom du jeton qui tranche — nul pour une résolution automatique. */
+    resolvedByLabel: string | null = null,
   ): Approval | null {
     const waiting = this.pending.get(approvalId);
     const resolved = this.store.resolveApproval(
@@ -125,6 +128,7 @@ export class ApprovalBroker {
       decision === 'allow' ? 'allowed' : 'denied',
       resolvedBy,
       note,
+      resolvedByLabel,
     );
     if (waiting) {
       clearTimeout(waiting.timer);

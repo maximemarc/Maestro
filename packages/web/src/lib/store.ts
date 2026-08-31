@@ -24,6 +24,8 @@ import type {
   ResiliencePolicy,
   RunAttempt,
   SessionHandoff,
+  TrainingBatch,
+  TrainingItem,
 } from '@maestro/shared';
 import { api } from './api';
 
@@ -90,6 +92,12 @@ export interface MaestroStore {
   runAttempts: Record<string, RunAttempt[]>;
   /** Derniers résumés de reprise capturés. */
   handoffs: SessionHandoff[];
+  /** Lots de génération de données d'entraînement. */
+  trainingBatches: TrainingBatch[];
+  /** Échantillons, par lot, chargés à l'ouverture du détail d'un lot. */
+  trainingItems: Record<string, TrainingItem[]>;
+  /** Lots dont la liste d'échantillons est tronquée — l'affichage doit le dire. */
+  trainingItemsTruncated: Record<string, boolean>;
   /** Notifications transitoires, rendues par ToastHost. */
   toasts: Toast[];
 
@@ -98,6 +106,8 @@ export interface MaestroStore {
   applyEvent: (event: ServerEvent) => void;
   /** Charge l'historique d'événements d'un run (transcript). */
   loadRunEvents: (runId: string) => Promise<void>;
+  /** Charge les échantillons d'un lot, et les tient à jour ensuite. */
+  loadTrainingItems: (batchId: string) => Promise<void>;
   /** Signale une action réussie. Les échecs restent affichés dans la page. */
   notify: (message: string, tone?: Toast['tone']) => void;
   dismissToast: (id: string) => void;
@@ -114,6 +124,9 @@ export const useStore = create<MaestroStore>((set, get) => ({
   policies: [],
   runAttempts: {},
   handoffs: [],
+  trainingBatches: [],
+  trainingItems: {},
+  trainingItemsTruncated: {},
   metrics: null,
   agents: [],
   runs: [],
@@ -145,6 +158,7 @@ export const useStore = create<MaestroStore>((set, get) => ({
       ragCollections,
       accounts,
       policies,
+      trainingBatches,
     ] = await Promise.all([
       api.overview(),
       api.listAgents(),
@@ -159,6 +173,7 @@ export const useStore = create<MaestroStore>((set, get) => ({
       api.listRagCollections(),
       api.listAccounts(),
       api.listPolicies(),
+      api.listTrainingBatches(),
     ]);
     set({
       bootstrapped: true,
@@ -177,6 +192,7 @@ export const useStore = create<MaestroStore>((set, get) => ({
       ragCollections,
       accounts,
       policies,
+      trainingBatches,
     });
   },
 
@@ -193,6 +209,17 @@ export const useStore = create<MaestroStore>((set, get) => ({
   loadRunEvents: async (runId) => {
     const { events } = await api.getRun(runId);
     set((state) => ({ runEvents: { ...state.runEvents, [runId]: events } }));
+  },
+
+  loadTrainingItems: async (batchId) => {
+    const { batch, items, itemsTruncated } = await api.getTrainingBatch(batchId);
+    set((state) => ({
+      trainingBatches: upsertById(state.trainingBatches, batch),
+      trainingItems: { ...state.trainingItems, [batchId]: items },
+      trainingItemsTruncated: itemsTruncated
+        ? { ...state.trainingItemsTruncated, [batchId]: true }
+        : state.trainingItemsTruncated,
+    }));
   },
 
   applyEvent: (event) => {
@@ -312,6 +339,31 @@ export const useStore = create<MaestroStore>((set, get) => ({
       case 'handoff.created':
         set((state) => ({ handoffs: [event.payload, ...state.handoffs].slice(0, 100) }));
         break;
+      case 'trainingBatch.updated':
+        set((state) => ({ trainingBatches: upsertById(state.trainingBatches, event.payload) }));
+        break;
+      case 'trainingBatch.deleted':
+        set((state) => ({
+          trainingBatches: state.trainingBatches.filter((b) => b.id !== event.payload.id),
+          trainingItems: Object.fromEntries(
+            Object.entries(state.trainingItems).filter(([id]) => id !== event.payload.id),
+          ),
+        }));
+        break;
+      /* Les échantillons ne sont tenus à jour que pour un lot déjà ouvert : un
+         lot de dix mille échantillons n'a pas à peupler le store parce qu'il
+         tourne quelque part. */
+      case 'trainingItem.updated': {
+        const item = event.payload;
+        set((state) => {
+          const known = state.trainingItems[item.batchId];
+          if (!known) return {};
+          return {
+            trainingItems: { ...state.trainingItems, [item.batchId]: upsertById(known, item) },
+          };
+        });
+        break;
+      }
       case 'tmux.updated':
         break;
     }

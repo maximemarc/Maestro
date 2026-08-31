@@ -53,6 +53,10 @@ export function RunChanges({ runId }: { runId: string }) {
   const [branchBusy, setBranchBusy] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
   const [delivered, setDelivered] = useState<string | null>(null);
+  /* Branche livrée localement : c'est elle qu'on proposera de publier. */
+  const [deliveredBranch, setDeliveredBranch] = useState<string | null>(null);
+  const [pushBusy, setPushBusy] = useState(false);
+  const [pushed, setPushed] = useState<{ branch: string; url: string | null } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -89,6 +93,8 @@ export function RunChanges({ runId }: { runId: string }) {
       setDelivered(
         `Branche ${result.branch} créée — ${result.files} fichier(s), ${result.sha.slice(0, 8)}`,
       );
+      setDeliveredBranch(result.branch);
+      setPushed(null);
       setBranchOpen(false);
       await load();
     } catch (err) {
@@ -97,6 +103,28 @@ export function RunChanges({ runId }: { runId: string }) {
       setBranchBusy(false);
     }
   }, [branch, commitMessage, load, runId]);
+
+  /*
+   * Publication.
+   *
+   * Le push emprunte les identifiants git de la machine ; Maestro ne stocke
+   * aucun jeton de forge. Le lien de merge request vient de la forge elle-même,
+   * dans la sortie du push — le fabriquer aurait demandé de connaître son
+   * domaine et sa convention d'URL.
+   */
+  const publish = useCallback(async () => {
+    if (!deliveredBranch) return;
+    setPushBusy(true);
+    setError(null);
+    try {
+      const result = await api.pushRunBranch(runId, { branch: deliveredBranch });
+      setPushed({ branch: result.branch, url: result.mergeRequestUrl });
+    } catch (err) {
+      setError(toMessage(err));
+    } finally {
+      setPushBusy(false);
+    }
+  }, [deliveredBranch, runId]);
 
   const download = useCallback(async () => {
     setError(null);
@@ -140,6 +168,31 @@ export function RunChanges({ runId }: { runId: string }) {
       {delivered && (
         <div className="card card-ok" role="status">
           {delivered}
+          {deliveredBranch && !pushed && (
+            <div className="row gap-2 mt-2">
+              <button className="btn sm" onClick={publish} disabled={pushBusy}>
+                {pushBusy && <Spinner />}
+                {pushBusy ? 'Publication…' : 'Publier sur le dépôt distant'}
+              </button>
+              <span className="text-faint text-xs">
+                Pousse la branche avec les identifiants git de la machine. Jamais en force.
+              </span>
+            </div>
+          )}
+          {pushed && (
+            <div className="mt-2">
+              <div>Branche {pushed.branch} publiée.</div>
+              {pushed.url ? (
+                <a className="btn sm mt-2" href={pushed.url} target="_blank" rel="noreferrer">
+                  Ouvrir la merge request
+                </a>
+              ) : (
+                <span className="text-faint text-xs">
+                  Le dépôt distant n’a proposé aucun lien de merge request.
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
       {error && <ErrorText>{error}</ErrorText>}
