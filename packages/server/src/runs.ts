@@ -6,12 +6,37 @@
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Options, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentConfig, Run, RunOrigin, RunStatus } from '@maestro/shared';
+import {
+  PROVIDER_CAPABILITIES,
+  PROVIDER_LABELS,
+  type AgentConfig,
+  type FailureClass,
+  type FailureVerdict,
+  type ProviderAccount,
+  type ProviderKind,
+  type ResiliencePolicy,
+  type Run,
+  type RunAttempt,
+  type RunOrigin,
+  type RunStatus,
+  type SessionHandoff,
+} from '@maestro/shared';
+import { ZERO_USAGE, type AttemptOutcome, type UsageDelta } from './providers/adapter.ts';
+import { classifyFailure, classifySilentSuccess, FAILURE_LABELS } from './providers/failure.ts';
+import { HandoffService } from './providers/handoff.ts';
+import {
+  formatDuration,
+  planFirstAttempt,
+  planRecovery,
+  type AttemptPlan,
+} from './providers/policy.ts';
+import type { ProviderService } from './providers/registry.ts';
 import type { AgentService } from './agents.ts';
 import type { Bus } from './bus.ts';
 import type { MaestroConfig } from './config.ts';
 import type { Store } from './db.ts';
 import type { TaskService } from './kanban.ts';
+import type { ControlDeps } from './mcp-actions.ts';
 import { buildMaestroServer } from './mcp-control.ts';
 import { buildCustomServer } from './mcp-custom.ts';
 import { snapshot as gitSnapshot } from './workspace-git.ts';
@@ -44,6 +69,17 @@ export interface StartRunInput {
    * besoin, ce qui borne naturellement le fan-out.
    */
   bypassConcurrencyCap?: boolean;
+  /**
+   * Politique de résilience imposée à ce run, qui l'emporte sur celle de
+   * l'agent. Les étapes de pipeline s'en servent pour router une étape vers un
+   * autre fournisseur sans dupliquer l'agent.
+   */
+  resiliencePolicyId?: string | null;
+  /**
+   * Sauts entre machines déjà effectués par la chaîne de délégation qui a mené
+   * à ce run. Renseigné par la fédération, propagé aux délégations suivantes.
+   */
+  federationHops?: number;
 }
 
 /** Paramètres d'un run en file, conservés jusqu'à son démarrage effectif. */
@@ -51,6 +87,8 @@ interface QueuedParams {
   depth: number;
   timeoutSecOverride: number | null;
   bypassConcurrencyCap: boolean;
+  policyOverride: string | null;
+  federationHops: number;
 }
 
 interface ActiveRun {
@@ -60,6 +98,26 @@ interface ActiveRun {
   cancelStatus: RunStatus | null;
   stderrTail: string;
   bypassConcurrencyCap: boolean;
+  policyOverride: string | null;
+  /** Sauts entre machines hérités, transmis aux outils de contrôle. */
+  federationHops: number;
+  /**
+   * Nature d'échec déjà connue de Maestro (budget, annulation), qui prime sur
+   * l'analyse du message : reclasser une décision interne en incident
+   * fournisseur ferait basculer un run qu'on vient volontairement d'arrêter.
+   */
+  failureHint: FailureClass | null;
+}
+
+/** Ce qui distingue une tentative d'une autre : compte, modèle, prompt, session. */
+interface AttemptSetup {
+  account: ProviderAccount | null;
+  model: string;
+  prompt: string;
+  resumeSessionId: string | null;
+  env: NodeJS.ProcessEnv;
+  /** Appelé à chaque tour avec le cumul de tokens — alimente le seuil de handoff. */
+  onProgress: (tokens: number) => void;
 }
 
 export class RunEngine {
@@ -85,7 +143,22 @@ export class RunEngine {
     private plugins: PluginService,
     private mcp: McpRegistry,
     private rag: RagService,
+    private providers: ProviderService,
+    private handoffs: HandoffService,
+    /**
+     * Délégation vers une autre instance.
+     *
+     * Injectée après construction plutôt qu'au constructeur : la fédération a
+     * besoin du moteur pour rien, mais le moteur en a besoin pour ses outils de
+     * contrôle. Un paramètre créerait une dépendance circulaire à l'assemblage.
+     */
+    private federation?: ControlDeps['federation'],
   ) {}
+
+  /** Branche la fédération après coup, une fois les deux services construits. */
+  attachFederation(federation: ControlDeps['federation']): void {
+    this.federation = federation;
+  }
 
   // -- API publique -----------------------------------------------------------
 
@@ -116,6 +189,12 @@ export class RunEngine {
       model: agent.model,
       engine: input.engineOverride ?? agent.engine,
       tmuxSession: null,
+      /* Renseignés pour de bon au démarrage de la première tentative : à la
+         création, la politique n'a pas encore été résolue. */
+      providerKind: 'claude-sdk',
+      accountId: null,
+      accountName: null,
+      attemptCount: 0,
       numTurns: 0,
       inputTokens: 0,
       outputTokens: 0,
@@ -139,6 +218,8 @@ export class RunEngine {
       depth: input.depth ?? 0,
       timeoutSecOverride: input.timeoutSecOverride ?? null,
       bypassConcurrencyCap: input.bypassConcurrencyCap ?? false,
+      policyOverride: input.resiliencePolicyId ?? null,
+      federationHops: input.federationHops ?? 0,
     });
     this.queue.push(run.id);
     this.pump();
@@ -162,6 +243,7 @@ export class RunEngine {
     const activeEntry = this.active.get(runId);
     if (activeEntry) {
       activeEntry.cancelStatus = 'cancelled';
+      activeEntry.failureHint = 'cancelled';
       activeEntry.abort.abort();
       this.approvals.cancelPendingForRun(runId);
       if (run.tmuxSession) void this.tmux.kill(run.tmuxSession);
@@ -173,6 +255,24 @@ export class RunEngine {
       this.queue.splice(idx, 1);
       this.queuedParams.delete(runId);
       this.finalize(run, 'cancelled', { error: 'Annulé avant démarrage' });
+      return true;
+    }
+
+    /*
+     * Run actif que le moteur ne pilote pas : une session externe, menée par un
+     * client MCP tiers. Elle ne s'interrompt pas — Maestro ne tient pas ce
+     * client — mais l'annulation reste utile : la cascade ci-dessus a déjà
+     * arrêté les runs qu'elle avait délégués, et la clore retire la session de
+     * Mission Control. Sans ce cas, un tel run restait « en cours » à vie, sans
+     * aucune prise.
+     */
+    if (!run.endedAt) {
+      this.finalize(run, 'cancelled', {
+        error:
+          run.origin === 'external'
+            ? "Session externe close depuis Maestro. Le client tiers n'est pas interrompu : il rouvrira une session à son prochain appel."
+            : 'Annulé',
+      });
       return true;
     }
     return false;
@@ -211,6 +311,7 @@ export class RunEngine {
   shutdown(): void {
     for (const [runId, entry] of this.active) {
       entry.cancelStatus = 'cancelled';
+      entry.failureHint = 'cancelled';
       entry.abort.abort();
       this.approvals.cancelPendingForRun(runId);
     }
@@ -274,11 +375,14 @@ export class RunEngine {
   private async execute(runId: string): Promise<void> {
     const params = this.queuedParams.get(runId);
     this.queuedParams.delete(runId);
-    const { depth, timeoutSecOverride, bypassConcurrencyCap } = params ?? {
-      depth: 0,
-      timeoutSecOverride: null,
-      bypassConcurrencyCap: false,
-    };
+    const { depth, timeoutSecOverride, bypassConcurrencyCap, policyOverride, federationHops } =
+      params ?? {
+        depth: 0,
+        timeoutSecOverride: null,
+        bypassConcurrencyCap: false,
+        policyOverride: null,
+        federationHops: 0,
+      };
 
     const run = this.store.getRun(runId);
     if (!run || run.status !== 'queued') return;
@@ -295,6 +399,9 @@ export class RunEngine {
       cancelStatus: null,
       stderrTail: '',
       bypassConcurrencyCap,
+      policyOverride,
+      federationHops,
+      failureHint: null,
     };
     this.active.set(run.id, entry);
 
@@ -309,9 +416,13 @@ export class RunEngine {
 
     try {
       if (run.engine === 'tmux') {
+        /* Le moteur tmux reste hors du mécanisme de repli : une session
+           interactive attachable ne se rejoue pas ailleurs, et un opérateur
+           attaché à un terminal ne veut pas voir sa session déplacée sous ses
+           pieds. */
         await this.executeTmux(run, agent, entry, timeoutSecOverride);
       } else {
-        await this.executeSdk(run, agent, entry, timeoutSecOverride);
+        await this.executeWithFallback(run, agent, entry, timeoutSecOverride);
       }
     } catch (err) {
       const fresh = this.store.getRun(run.id);
@@ -329,6 +440,430 @@ export class RunEngine {
       this.active.delete(run.id);
       this.pump();
     }
+  }
+
+  /**
+   * Boucle de tentatives : exécute, classe l'échec, décide, recommence.
+   *
+   * Toute la valeur du multi-fournisseurs tient ici. Le run n'est finalisé
+   * qu'une fois — à la réussite, ou quand le routeur renonce — pour que
+   * l'extérieur (kanban, pipelines, Telegram) ne voie jamais un échec
+   * intermédiaire comme un échec définitif.
+   */
+  private async executeWithFallback(
+    run: Run,
+    agent: AgentConfig,
+    entry: ActiveRun,
+    timeoutSecOverride: number | null,
+  ): Promise<void> {
+    const policy = this.providers.effectivePolicy(agent, entry.policyOverride);
+    const resolved = policy
+      ? this.providers.withinBudget(this.providers.resolveTargets(policy))
+      : [];
+    const routed = policy !== null && resolved.length > 0;
+
+    if (policy && resolved.length === 0) {
+      this.bus.log(
+        'warn',
+        'runs',
+        `Politique « ${policy.name} » : aucun compte utilisable — repli sur l'environnement ambiant`,
+        { runId: run.id, agentId: agent.id },
+      );
+    }
+
+    const basePrompt = this.buildPrompt(run);
+    let handoff: SessionHandoff | null = null;
+    let thresholdCaptured = false;
+    let attemptIndex = 0;
+    let attemptsOnCurrent = 0;
+    let lastOutcome: AttemptOutcome | null = null;
+    let lastVerdict: FailureVerdict | null = null;
+
+    let plan: AttemptPlan = routed
+      ? planFirstAttempt({
+          policy: policy!,
+          targets: resolved,
+          nowMs: Date.now(),
+          underPressure: this.providers.underPressure(policy!),
+        })
+      : {
+          action: 'retry_same',
+          target: null,
+          waitMs: 0,
+          requiresHandoff: false,
+          reason: 'environnement ambiant du serveur, sans repli',
+        };
+
+    while (plan.action !== 'give_up') {
+      if (entry.abort.signal.aborted) break;
+
+      if (plan.waitMs > 0) {
+        this.emitEvent(run, 'info', {
+          text: `Attente de ${formatDuration(plan.waitMs)} — ${plan.reason}`,
+        });
+        run.status = 'queued';
+        this.store.updateRun(run);
+        this.bus.publish({ type: 'run.updated', payload: run });
+        const slept = await this.sleep(plan.waitMs, entry.abort.signal);
+        if (!slept) break;
+        run.status = 'running';
+        this.store.updateRun(run);
+        this.bus.publish({ type: 'run.updated', payload: run });
+      }
+
+      /* Une session appartient au compte qui l'a créée : dès qu'on change de
+         cible, l'identifiant de reprise ne vaut plus rien et c'est le résumé
+         qui prend le relais. */
+      if (plan.requiresHandoff && !entry.abort.signal.aborted) {
+        handoff = await this.handoffs.capture({
+          run,
+          agent,
+          reason:
+            lastVerdict?.klass === 'context'
+              ? 'context'
+              : lastVerdict?.klass === 'quota'
+                ? 'quota'
+                : 'switch',
+          tokensAtCapture: run.inputTokens + run.outputTokens,
+          /* Sur le chemin d'un blocage, tenter un résumé raisonné retarderait
+             la bascule pour un appel qui échouera probablement aussi. */
+          allowModel: lastVerdict?.klass !== 'quota',
+        });
+        run.sessionId = null;
+      }
+
+      const account = plan.target?.account ?? null;
+      const kind = account?.kind ?? 'claude-sdk';
+      const model = plan.target?.target.model ?? account?.model ?? agent.model;
+      const label = account?.name ?? 'environnement ambiant';
+
+      attemptIndex++;
+      attemptsOnCurrent = plan.action === 'switch_account' ? 1 : attemptsOnCurrent + 1;
+
+      run.providerKind = kind;
+      run.accountId = account?.id ?? null;
+      run.accountName = account?.name ?? null;
+      run.attemptCount = attemptIndex;
+      run.model = model;
+      this.store.updateRun(run);
+      this.bus.publish({ type: 'run.updated', payload: run });
+
+      const attemptRow = this.store.insertRunAttempt({
+        runId: run.id,
+        index: attemptIndex,
+        accountId: account?.id ?? null,
+        accountName: label,
+        providerKind: kind,
+        model,
+        status: 'running',
+        failureClass: null,
+        error: null,
+        waitedMs: plan.waitMs,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        costUsd: 0,
+        startedAt: nowIso(),
+        endedAt: null,
+      });
+      this.bus.publish({ type: 'run.attempt', payload: attemptRow });
+      if (attemptIndex > 1) {
+        this.emitEvent(run, 'info', {
+          text: `Tentative ${attemptIndex} — ${plan.reason}`,
+        });
+      } else if (plan.target && plan.target.index > 0) {
+        /* Premier essai ailleurs que sur le compte de tête : c'est le cas
+           surprenant. Le taire laisserait l'opérateur devant un run exécuté par
+           un compte qu'il n'avait pas mis en premier, sans explication. */
+        this.emitEvent(run, 'info', { text: `Démarrage sur le ${plan.reason}` });
+      }
+
+      this.warnIfPermissionsUnenforced(run, agent, kind);
+
+      const prompt = handoff ? `${HandoffService.preamble(handoff)}\n${basePrompt}` : basePrompt;
+      const env = this.providers.envForAccount(account);
+      const setup: AttemptSetup = {
+        account,
+        model,
+        prompt,
+        resumeSessionId: run.sessionId,
+        env,
+        onProgress: (tokens) => {
+          if (thresholdCaptured || !policy || policy.handoffThresholdPct <= 0) return;
+          if (!this.overHandoffThreshold(agent, policy, tokens, account?.id ?? null)) return;
+          thresholdCaptured = true;
+          /* Capture anticipée, volontairement non attendue : bloquer le flux
+             du transcript pour rédiger un résumé rendrait l'interface muette
+             pendant tout l'appel. */
+          void this.handoffs
+            .capture({ run, agent, reason: 'threshold', tokensAtCapture: tokens, allowModel: true })
+            .then((captured) => {
+              handoff = captured;
+            })
+            .catch(() => {
+              /* Échec sans conséquence : le filet de sécurité recapturera au
+                 moment du blocage, en mode mécanique. */
+            });
+        },
+      };
+
+      const outcome = await this.runOneAttempt(run, agent, entry, timeoutSecOverride, setup, kind);
+      lastOutcome = outcome;
+      this.applyUsage(run, outcome);
+
+      /* La classification précède l'enregistrement : la tentative n'est écrite
+         qu'une fois, avec sa classe d'échec. L'écrire d'abord sans, puis la
+         corriger, laissait passer un état intermédiaire faux dans la base et
+         dans tout ce qui l'observe. */
+      const verdict =
+        outcome.status === 'succeeded'
+          ? null
+          : classifyFailure({
+              message: outcome.error ?? 'échec sans message',
+              status: outcome.failureSignal?.status ?? null,
+              headers: outcome.failureSignal?.headers ?? null,
+              code: outcome.failureSignal?.code ?? null,
+              hint: outcome.failureSignal?.hint ?? null,
+            });
+
+      const settled: RunAttempt = {
+        ...attemptRow,
+        status: outcome.status,
+        failureClass: verdict?.klass ?? null,
+        error: outcome.error,
+        inputTokens: outcome.usage.inputTokens,
+        outputTokens: outcome.usage.outputTokens,
+        cacheReadTokens: outcome.usage.cacheReadTokens,
+        cacheWriteTokens: outcome.usage.cacheWriteTokens,
+        costUsd: outcome.usage.costUsd,
+        endedAt: nowIso(),
+      };
+      this.store.updateRunAttempt(settled);
+      /* Diffusé, et pas seulement enregistré : sans cet événement, un transcript
+         ouvert gardait la tentative sur « en cours » jusqu'au rechargement de
+         la page — y compris après la fin du run. */
+      this.bus.publish({ type: 'run.attempt', payload: settled });
+
+      if (outcome.status === 'succeeded' || !verdict) {
+        this.providers.markSuccess(account?.id ?? null);
+        this.finalize(run, 'succeeded', { resultText: outcome.resultText });
+        return;
+      }
+
+      lastVerdict = verdict;
+      this.emitEvent(run, 'error', {
+        text: `Tentative ${attemptIndex} sur « ${label} » : ${FAILURE_LABELS[verdict.klass]} — ${verdict.message}`,
+      });
+      this.providers.markFailure(account?.id ?? null, verdict);
+
+      if (verdict.klass === 'cancelled' || entry.abort.signal.aborted) break;
+
+      if (!routed || !policy) {
+        plan = {
+          action: 'give_up',
+          target: null,
+          waitMs: 0,
+          requiresHandoff: false,
+          reason: FAILURE_LABELS[verdict.klass],
+        };
+        break;
+      }
+
+      plan = planRecovery({
+        policy,
+        targets: this.providers.withinBudget(this.providers.resolveTargets(policy)),
+        verdict,
+        currentAccountId: account?.id ?? null,
+        attemptsOnCurrent,
+        totalAttempts: attemptIndex,
+        nowMs: Date.now(),
+      });
+      if (plan.action !== 'give_up') {
+        this.bus.log('info', 'runs', `Run ${run.id} — ${plan.reason}`, {
+          runId: run.id,
+          agentId: agent.id,
+        });
+      }
+    }
+
+    /*
+     * Filet de sécurité : un run qui s'arrête sur une limite d'usage ou un
+     * contexte saturé laisse un travail en cours. Le résumer maintenant, même
+     * mécaniquement, est la seule façon de pouvoir le reprendre ailleurs plus
+     * tard — c'est précisément le moment où plus aucun modèle n'est joignable.
+     */
+    if (lastVerdict && (lastVerdict.klass === 'quota' || lastVerdict.klass === 'context')) {
+      await this.handoffs
+        .capture({
+          run,
+          agent,
+          reason: lastVerdict.klass === 'context' ? 'context' : 'quota',
+          tokensAtCapture: run.inputTokens + run.outputTokens,
+          allowModel: false,
+        })
+        .catch(() => undefined);
+    }
+
+    const status: RunStatus = entry.cancelStatus ?? 'failed';
+    const reason = plan.action === 'give_up' && plan.reason ? plan.reason : null;
+    this.finalize(run, status, {
+      error:
+        status === 'cancelled'
+          ? 'Annulé'
+          : status === 'timeout'
+            ? 'Délai maximal dépassé'
+            : [lastOutcome?.error, reason].filter(Boolean).join(' — ') || 'Échec',
+      resultText: lastOutcome?.resultText ?? entry.report,
+    });
+  }
+
+  /** Aiguille vers le SDK Claude ou vers un adaptateur externe. */
+  private async runOneAttempt(
+    run: Run,
+    agent: AgentConfig,
+    entry: ActiveRun,
+    timeoutSecOverride: number | null,
+    setup: AttemptSetup,
+    kind: ProviderKind,
+  ): Promise<AttemptOutcome> {
+    if (kind === 'claude-sdk') {
+      return await this.executeSdk(run, agent, entry, timeoutSecOverride, setup);
+    }
+    const adapter = this.providers.adapterFor(kind);
+    if (!adapter) {
+      return {
+        status: 'failed',
+        sessionId: null,
+        resultText: null,
+        error: `Fournisseur « ${kind} » sans adaptateur`,
+        failureSignal: { hint: 'fatal' },
+        usage: { ...ZERO_USAGE },
+      };
+    }
+    /*
+     * Contrôleur propre à la tentative, relié à celui du run.
+     *
+     * L'annulation descend (le run coupe la tentative), elle ne remonte pas.
+     * Passer directement le contrôleur du run rendait le repli inopérant : un
+     * adaptateur qui abandonne sur son propre délai maximal annulait le
+     * contrôleur partagé, et la boucle s'arrêtait aussitôt sur
+     * `entry.abort.signal.aborted` — sans jamais essayer le compte suivant.
+     * Le garde-fou d'une tentative désarmait le mécanisme entier.
+     */
+    const attemptAbort = new AbortController();
+    const relay = (): void => attemptAbort.abort();
+    if (entry.abort.signal.aborted) attemptAbort.abort();
+    else entry.abort.signal.addEventListener('abort', relay, { once: true });
+
+    try {
+      return await adapter.execute({
+        run,
+        agent,
+        account: setup.account,
+        model: setup.model,
+        prompt: setup.prompt,
+        resumeSessionId: setup.resumeSessionId,
+        workspaceDir: agent.workspaceDir,
+        timeoutSec: timeoutSecOverride ?? agent.timeoutSec,
+        abort: attemptAbort,
+        env: setup.env,
+        emit: (eventKind, payload) => this.emitEvent(run, eventKind, payload),
+        onUsage: () => undefined,
+      });
+    } finally {
+      // Sans ce retrait, chaque tentative laisserait un écouteur derrière elle.
+      entry.abort.signal.removeEventListener('abort', relay);
+    }
+  }
+
+  /**
+   * Cumule la consommation d'une tentative sur le run.
+   *
+   * Additif, et non remplaçant : un run qui a basculé deux fois a réellement
+   * consommé sur deux comptes, et n'afficher que la dernière tentative
+   * sous-estimerait la facture.
+   */
+  private applyUsage(run: Run, outcome: AttemptOutcome): void {
+    run.inputTokens += outcome.usage.inputTokens;
+    run.outputTokens += outcome.usage.outputTokens;
+    run.cacheReadTokens += outcome.usage.cacheReadTokens;
+    run.cacheWriteTokens += outcome.usage.cacheWriteTokens;
+    run.costUsd += outcome.usage.costUsd;
+    run.numTurns += outcome.usage.numTurns;
+    if (outcome.sessionId) run.sessionId = outcome.sessionId;
+    this.store.updateRun(run);
+  }
+
+  /**
+   * Seuil de capture anticipée.
+   *
+   * Deux jauges possibles — budget de tokens, nombre de tours — et aucune n'est
+   * obligatoire. Sans garde-fou configuré, il n'existe aucune notion de « fin
+   * proche » : la capture anticipée est alors simplement inactive, et le filet
+   * de sécurité reste seul en poste.
+   */
+  private overHandoffThreshold(
+    agent: AgentConfig,
+    policy: ResiliencePolicy,
+    tokens: number,
+    accountId: string | null,
+  ): boolean {
+    if (
+      agent.tokenBudget &&
+      agent.tokenBudget > 0 &&
+      (tokens / agent.tokenBudget) * 100 >= policy.handoffThresholdPct
+    ) {
+      return true;
+    }
+    /*
+     * Seconde jauge : la fenêtre du compte lui-même.
+     *
+     * C'est celle qui compte vraiment, et la seule qui existe quand l'agent n'a
+     * pas de budget déclaré — le cas courant. Elle permet de capturer le résumé
+     * pendant qu'un modèle répond encore, au lieu d'attendre le refus et de
+     * devoir se rabattre sur une reconstruction mécanique.
+     */
+    if (!accountId) return false;
+    const usage = this.providers.usageFor(accountId);
+    if (!usage || usage.pressure === null) return false;
+    return usage.pressure * 100 >= policy.handoffThresholdPct;
+  }
+
+  /**
+   * Prévient quand la politique d'approbation devient déclarative.
+   *
+   * Un agent en `guarded` ou `ask` exécuté par un CLI tiers n'est plus protégé
+   * par le broker : le dire dans le transcript est le minimum, le taire serait
+   * une fausse assurance de sécurité.
+   */
+  private warnIfPermissionsUnenforced(run: Run, agent: AgentConfig, kind: ProviderKind): void {
+    if (PROVIDER_CAPABILITIES[kind].interceptsPermissions) return;
+    if (agent.approvalPolicy === 'auto') return;
+    const text =
+      `⚠ Politique d'approbation « ${agent.approvalPolicy} » non applicable sur ${PROVIDER_LABELS[kind]} : ` +
+      `ce moteur n'expose pas d'interception d'outils. Les garde-fous de Maestro sont déclaratifs pour cette tentative.`;
+    this.emitEvent(run, 'info', { text });
+    this.bus.log('warn', 'runs', text, { runId: run.id, agentId: agent.id });
+  }
+
+  /** Attente interruptible ; rend faux si le run a été annulé pendant. */
+  private sleep(ms: number, signal: AbortSignal): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (signal.aborted) {
+        resolve(false);
+        return;
+      }
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(true);
+      }, ms);
+      function onAbort(): void {
+        clearTimeout(timer);
+        resolve(false);
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   private buildPrompt(run: Run): string {
@@ -379,12 +914,20 @@ export class RunEngine {
     }
   }
 
+  /**
+   * Une tentative sur le fournisseur Claude Code.
+   *
+   * Rend un résultat, ne finalise pas : c'est `executeWithFallback` qui décide
+   * si l'échec vaut un nouvel essai, une bascule ou un abandon. Une méthode qui
+   * clôturerait le run ici rendrait tout repli impossible.
+   */
   private async executeSdk(
     run: Run,
     agent: AgentConfig,
     entry: ActiveRun,
     timeoutSecOverride: number | null,
-  ): Promise<void> {
+    attempt: AttemptSetup,
+  ): Promise<AttemptOutcome> {
     const settings = this.store.getSettings();
     const maestroServer = buildMaestroServer(
       {
@@ -393,8 +936,12 @@ export class RunEngine {
         bus: this.bus,
         engine: this,
         maxAgentDepth: () => settings.maxAgentDepth,
+        federation: this.federation,
       },
-      { runId: run.id, agent, depth: entry.depth },
+      /* Les sauts entre machines voyagent avec le run : sans cela, un run créé
+         par une voisine repartirait de zéro et un aller-retour A→B→A ne serait
+         borné par rien. */
+      { runId: run.id, agent, depth: entry.depth, federationHops: entry.federationHops },
     );
 
     // Garde-fou de délai.
@@ -468,7 +1015,7 @@ export class RunEngine {
     // entrée nue y court-circuiterait canUseTool ; le broker les autorise déjà.
     const options: Options = {
       cwd: agent.workspaceDir,
-      model: agent.model,
+      model: attempt.model,
       permissionMode: agent.permissionMode,
       ...(agent.permissionMode === 'bypassPermissions'
         ? { allowDangerouslySkipPermissions: true }
@@ -489,21 +1036,22 @@ export class RunEngine {
         ? { disallowedTools: agent.disallowedTools }
         : {}),
       ...(agent.maxTurns ? { maxTurns: agent.maxTurns } : {}),
-      ...(run.sessionId ? { resume: run.sessionId } : {}),
+      ...(attempt.resumeSessionId ? { resume: attempt.resumeSessionId } : {}),
       abortController: entry.abort,
       stderr: (data: string) => {
         entry.stderrTail = (entry.stderrTail + data).slice(-4000);
       },
       canUseTool: async (toolName, input): Promise<PermissionResult> =>
         this.handlePermission(run.id, agent, toolName, input, forcedApproval),
-      env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'maestro/0.1.0' },
+      env: { ...attempt.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'maestro/0.1.0' },
     };
 
     let cumulatedTokens = 0;
     let gotResult = false;
+    const usage: UsageDelta = { ...ZERO_USAGE };
 
     try {
-      for await (const message of query({ prompt: this.buildPrompt(run), options })) {
+      for await (const message of query({ prompt: attempt.prompt, options })) {
         if (message.type === 'system' && message.subtype === 'init') {
           run.sessionId = message.session_id;
           this.store.updateRun(run);
@@ -513,11 +1061,13 @@ export class RunEngine {
             tools: message.tools,
           });
         } else if (message.type === 'assistant') {
-          const usage = message.message.usage;
-          if (usage) {
-            cumulatedTokens += (usage.input_tokens ?? 0) + (usage.output_tokens ?? 0);
+          const turnUsage = message.message.usage;
+          if (turnUsage) {
+            cumulatedTokens += (turnUsage.input_tokens ?? 0) + (turnUsage.output_tokens ?? 0);
+            attempt.onProgress(cumulatedTokens);
             if (agent.tokenBudget && cumulatedTokens > agent.tokenBudget) {
               entry.cancelStatus = 'failed';
+              entry.failureHint = 'budget';
               this.emitEvent(run, 'error', {
                 text: `Budget de tokens dépassé (${cumulatedTokens} > ${agent.tokenBudget})`,
               });
@@ -563,60 +1113,117 @@ export class RunEngine {
         } else if (message.type === 'result') {
           gotResult = true;
           run.sessionId = message.session_id;
-          run.numTurns = message.num_turns;
-          run.costUsd = message.total_cost_usd;
-          run.inputTokens = message.usage.input_tokens ?? 0;
-          run.outputTokens = message.usage.output_tokens ?? 0;
-          run.cacheReadTokens = message.usage.cache_read_input_tokens ?? 0;
-          run.cacheWriteTokens = message.usage.cache_creation_input_tokens ?? 0;
+          usage.numTurns = message.num_turns;
+          usage.costUsd = message.total_cost_usd;
+          usage.inputTokens = message.usage.input_tokens ?? 0;
+          usage.outputTokens = message.usage.output_tokens ?? 0;
+          usage.cacheReadTokens = message.usage.cache_read_input_tokens ?? 0;
+          usage.cacheWriteTokens = message.usage.cache_creation_input_tokens ?? 0;
           this.emitEvent(run, 'result', {
             usage: {
-              inputTokens: run.inputTokens,
-              outputTokens: run.outputTokens,
-              cacheReadTokens: run.cacheReadTokens,
-              cacheWriteTokens: run.cacheWriteTokens,
+              inputTokens: usage.inputTokens,
+              outputTokens: usage.outputTokens,
+              cacheReadTokens: usage.cacheReadTokens,
+              cacheWriteTokens: usage.cacheWriteTokens,
             },
-            costUsd: run.costUsd,
-            numTurns: run.numTurns,
+            costUsd: usage.costUsd,
+            numTurns: usage.numTurns,
             durationMs: message.duration_ms,
           });
           if (message.subtype === 'success') {
-            this.finalize(run, 'succeeded', { resultText: entry.report ?? message.result });
-          } else {
-            const reason =
-              message.subtype === 'error_max_turns'
-                ? 'Nombre de tours maximum atteint'
-                : message.subtype === 'error_max_budget_usd'
-                  ? 'Budget maximal (USD) atteint'
-                  : `Erreur d'exécution${'errors' in message && message.errors.length ? ` : ${message.errors.join(' ; ')}` : ''}`;
-            this.finalize(run, 'failed', { error: reason, resultText: entry.report });
+            /* Un « succès » qui n'a consommé aucun token n'a pas été produit
+               par un modèle : c'est un message d'erreur du CLI présenté comme
+               une réponse. Le prendre au mot clôturerait le run en vert sans
+               jamais tenter le compte suivant. */
+            const consumed =
+              usage.inputTokens +
+              usage.outputTokens +
+              usage.cacheReadTokens +
+              usage.cacheWriteTokens;
+            const disguised = classifySilentSuccess(message.result, consumed);
+            if (disguised) {
+              return {
+                status: 'failed',
+                sessionId: run.sessionId,
+                resultText: null,
+                error: message.result,
+                failureSignal: { hint: disguised },
+                usage,
+              };
+            }
+            return {
+              status: 'succeeded',
+              sessionId: run.sessionId,
+              resultText: entry.report ?? message.result,
+              error: null,
+              usage,
+            };
           }
+          const reason =
+            message.subtype === 'error_max_turns'
+              ? 'Nombre de tours maximum atteint'
+              : message.subtype === 'error_max_budget_usd'
+                ? 'Budget maximal (USD) atteint'
+                : `Erreur d'exécution${'errors' in message && message.errors.length ? ` : ${message.errors.join(' ; ')}` : ''}`;
+          /* Tours et budget sont des garde-fous configurés, pas des incidents
+             fournisseur : les rejouer ailleurs redonnerait le même verdict. */
+          const guardrail =
+            message.subtype === 'error_max_turns' || message.subtype === 'error_max_budget_usd';
+          return {
+            status: 'failed',
+            sessionId: run.sessionId,
+            resultText: entry.report,
+            error: reason,
+            failureSignal: guardrail ? { hint: 'budget' } : {},
+            usage,
+          };
         }
+      }
+      /* Le flux s'est tari sans message `result` : ni succès ni erreur nommée.
+         C'est anormal, et le taire ferait passer un run vide pour une réussite. */
+      if (!gotResult) {
+        return {
+          status: 'failed',
+          sessionId: run.sessionId,
+          resultText: entry.report,
+          error: 'La session s’est terminée sans résultat',
+          failureSignal: { hint: entry.failureHint },
+          usage,
+        };
       }
     } catch (err) {
-      // query() lève après un résultat d'erreur déjà traité : ne pas re-finaliser.
-      if (!gotResult) {
-        const fresh = this.store.getRun(run.id);
-        if (fresh && !fresh.endedAt) {
-          const status = entry.cancelStatus ?? 'failed';
-          const detail = err instanceof Error ? err.message : String(err);
-          const stderrHint = entry.stderrTail
-            ? `\n--- stderr ---\n${entry.stderrTail.slice(-1500)}`
-            : '';
-          this.finalize({ ...fresh, sessionId: run.sessionId }, status, {
-            error:
-              status === 'cancelled'
-                ? 'Annulé'
-                : status === 'timeout'
-                  ? 'Délai maximal dépassé'
-                  : `${detail}${stderrHint}`,
-            resultText: entry.report,
-          });
-        }
-      }
+      const detail = err instanceof Error ? err.message : String(err);
+      const stderrHint = entry.stderrTail
+        ? `\n--- stderr ---\n${entry.stderrTail.slice(-1500)}`
+        : '';
+      const cancelled = entry.cancelStatus === 'cancelled';
+      const timedOut = entry.cancelStatus === 'timeout';
+      return {
+        status: 'failed',
+        sessionId: run.sessionId,
+        resultText: entry.report,
+        error: cancelled ? 'Annulé' : timedOut ? 'Délai maximal dépassé' : `${detail}${stderrHint}`,
+        failureSignal: {
+          code: (err as NodeJS.ErrnoException)?.code ?? null,
+          /* Un délai dépassé est un garde-fou Maestro, comme le budget : le
+             rejouer ailleurs relancerait la même course contre le même
+             chronomètre. */
+          hint: cancelled ? 'cancelled' : timedOut ? 'budget' : entry.failureHint,
+        },
+        usage,
+      };
     } finally {
       if (timeoutTimer) clearTimeout(timeoutTimer);
     }
+
+    return {
+      status: 'failed',
+      sessionId: run.sessionId,
+      resultText: entry.report,
+      error: 'Session interrompue',
+      failureSignal: { hint: entry.failureHint },
+      usage,
+    };
   }
 
   private async executeTmux(

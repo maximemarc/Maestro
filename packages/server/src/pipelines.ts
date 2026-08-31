@@ -159,6 +159,10 @@ export class PipelineService {
           // Une session tmux interactive ne se termine pas d'elle-même : un
           // enchaînement exige des runs qui finissent, donc le moteur SDK.
           engineOverride: 'sdk',
+          /* Politique propre à l'étape, qui l'emporte sur celle de l'agent :
+             une même chaîne peut ainsi rédiger sur un compte d'abonnement et
+             synthétiser sur une API bon marché. */
+          resiliencePolicyId: step.resiliencePolicyId ?? null,
         });
       } catch (err) {
         const sr = pr.stepRuns[i];

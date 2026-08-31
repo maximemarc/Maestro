@@ -47,6 +47,23 @@ import type {
   TmuxSessionInfo,
   TokensByBucket,
   UpsertSkillRequest,
+  AccountUsage,
+  Beat,
+  FederatedPeer,
+  FederatedPeerCreate,
+  HeartbeatConfig,
+  SituationReport,
+  OnboardingState,
+  OnboardingStep,
+  ProviderAccount,
+  ProviderAccountCreate,
+  ProviderCapabilities,
+  ProviderKind,
+  ProviderProbe,
+  ResiliencePolicy,
+  ResiliencePolicyCreate,
+  RunAttempt,
+  SessionHandoff,
 } from '@maestro/shared';
 
 /**
@@ -342,4 +359,72 @@ export const api = {
   // Paramètres
   getSettings: () => request<Settings>('GET', '/api/settings'),
   patchSettings: (patch: Partial<Settings>) => request<Settings>('PATCH', '/api/settings', patch),
+
+  // Fournisseurs & comptes
+  providerCapabilities: () =>
+    request<(ProviderCapabilities & { kind: ProviderKind })[]>(
+      'GET',
+      '/api/providers/capabilities',
+    ),
+  probeProviders: () => request<ProviderProbe[]>('GET', '/api/providers/probe'),
+  accountTemplate: (kind: ProviderKind) =>
+    request<ProviderAccountCreate>('GET', `/api/providers/template/${kind}`),
+  listAccounts: () => request<ProviderAccount[]>('GET', '/api/providers/accounts'),
+  createAccount: (input: ProviderAccountCreate) =>
+    request<ProviderAccount>('POST', '/api/providers/accounts', input),
+  updateAccount: (id: string, patch: Partial<ProviderAccountCreate>) =>
+    request<ProviderAccount>('PATCH', `/api/providers/accounts/${id}`, patch),
+  deleteAccount: (id: string) =>
+    request<{ ok: boolean }>('DELETE', `/api/providers/accounts/${id}`),
+  testAccount: (id: string) =>
+    request<ProviderAccount>('POST', `/api/providers/accounts/${id}/test`),
+  /** Prépare un répertoire de profil ; la connexion reste manuelle. */
+  prepareProfile: (slug: string) =>
+    request<{ configDir: string; command: string }>('POST', '/api/providers/profiles', { slug }),
+  accountSuggestions: () => request<ProviderAccountCreate[]>('GET', '/api/providers/suggestions'),
+  /** Consommation de tous les comptes sur leur fenêtre glissante. */
+  providersUsage: () => request<AccountUsage[]>('GET', '/api/providers/usage'),
+  accountUsage: (id: string) => request<AccountUsage>('GET', `/api/providers/accounts/${id}/usage`),
+
+  // Politiques de résilience
+  listPolicies: () => request<ResiliencePolicy[]>('GET', '/api/providers/policies'),
+  createPolicy: (input: ResiliencePolicyCreate) =>
+    request<ResiliencePolicy>('POST', '/api/providers/policies', input),
+  updatePolicy: (id: string, patch: Partial<ResiliencePolicyCreate>) =>
+    request<ResiliencePolicy>('PATCH', `/api/providers/policies/${id}`, patch),
+  deletePolicy: (id: string) => request<{ ok: boolean }>('DELETE', `/api/providers/policies/${id}`),
+
+  // Tentatives & reprises
+  listRunAttempts: (runId: string) => request<RunAttempt[]>('GET', `/api/runs/${runId}/attempts`),
+  listHandoffs: (agentId?: string) =>
+    request<SessionHandoff[]>('GET', `/api/handoffs${agentId ? `?agentId=${agentId}` : ''}`),
+  getHandoff: (id: string) => request<SessionHandoff>('GET', `/api/handoffs/${id}`),
+
+  // Fédération
+  listPeers: () => request<FederatedPeer[]>('GET', '/api/peers'),
+  createPeer: (input: FederatedPeerCreate) => request<FederatedPeer>('POST', '/api/peers', input),
+  updatePeer: (id: string, patch: Partial<FederatedPeerCreate>) =>
+    request<FederatedPeer>('PATCH', `/api/peers/${id}`, patch),
+  deletePeer: (id: string) => request<{ ok: boolean }>('DELETE', `/api/peers/${id}`),
+  testPeer: (id: string) => request<FederatedPeer>('POST', `/api/peers/${id}/test`),
+
+  // Battement de cœur
+  getHeartbeat: () =>
+    request<{ config: HeartbeatConfig; nextBeatAt: string | null; beats: Beat[] }>(
+      'GET',
+      '/api/heartbeat',
+    ),
+  patchHeartbeat: (patch: Partial<HeartbeatConfig>) =>
+    request<HeartbeatConfig>('PATCH', '/api/heartbeat', patch),
+  heartbeatSituation: () => request<SituationReport>('GET', '/api/heartbeat/situation'),
+  beatNow: () => request<Beat>('POST', '/api/heartbeat/beat'),
+
+  // Assistant de configuration
+  getOnboarding: () =>
+    request<{ state: OnboardingState; accounts: number; policies: number }>(
+      'GET',
+      '/api/onboarding',
+    ),
+  patchOnboarding: (patch: { step?: OnboardingStep; completed?: boolean }) =>
+    request<OnboardingState>('PATCH', '/api/onboarding', patch),
 };

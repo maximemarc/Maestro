@@ -19,7 +19,7 @@ import {
   Scroll,
   X,
 } from '@phosphor-icons/react';
-import { ACTIVE_RUN_STATUSES } from '@maestro/shared';
+import { ACTIVE_RUN_STATUSES, PROVIDER_LABELS } from '@maestro/shared';
 import type { Run, RunEvent } from '@maestro/shared';
 import { api } from '../lib/api';
 import {
@@ -42,6 +42,7 @@ import {
   Spinner,
   StatusBadge,
 } from '../components/ui';
+import { RunAttempts } from '../components/RunAttempts';
 import { RunChanges } from '../components/RunChanges';
 
 const EMPTY_EVENTS: RunEvent[] = [];
@@ -475,6 +476,12 @@ export default function RunDetail() {
               <dd className="mono" title={run.sessionId ?? undefined}>
                 {sessionShort ?? <span className="text-faint">aucune</span>}
               </dd>
+              <dt>Exécuté par</dt>
+              <dd>
+                {PROVIDER_LABELS[run.providerKind]}
+                {run.accountName ? ` — ${run.accountName}` : ''}
+                {run.attemptCount > 1 ? ` (${run.attemptCount} tentatives)` : ''}
+              </dd>
               <dt>Tours</dt>
               <dd>{run.numTurns}</dd>
               <dt>Tokens</dt>
@@ -527,6 +534,7 @@ export default function RunDetail() {
 
           {/* Avant le transcript : ce que le run a produit compte plus que la
               façon dont il l'a dit. */}
+          <RunAttempts runId={run.id} />
           <RunChanges runId={run.id} />
 
           <section aria-label="Transcript du run">

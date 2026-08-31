@@ -23,6 +23,11 @@ import { McpError, type McpRegistry } from './mcp-registry.ts';
 import { PluginError, type PluginService } from './plugins.ts';
 import { embeddingStatus } from './rag-embeddings.ts';
 import { RagError, type RagService } from './rag.ts';
+import { readHops, type FederationService } from './federation.ts';
+import type { HeartbeatService } from './heartbeat.ts';
+import type { HandoffService } from './providers/handoff.ts';
+import type { ProviderService } from './providers/registry.ts';
+import { registerProviderRoutes } from './routes-providers.ts';
 import type { SessionRadar } from './radar.ts';
 import type { SkillRegistry } from './skills.ts';
 import type { TmuxBridge } from './tmux.ts';
@@ -53,6 +58,10 @@ export interface Services {
   rag: RagService;
   radar: SessionRadar;
   tmux: TmuxBridge;
+  providers: ProviderService;
+  handoffs: HandoffService;
+  heartbeat: HeartbeatService;
+  federation: FederationService;
   telegramEnabled: boolean;
   startedAt: string;
 }
@@ -175,6 +184,7 @@ const agentBaseSchema = z.object({
   pluginIds: z.array(z.string().max(40)).default([]),
   mcpServerIds: z.array(z.string().max(40)).default([]),
   ragCollectionIds: z.array(z.string().max(40)).default([]),
+  resiliencePolicyId: z.string().max(60).nullable().default(null),
   workspaceDir: z.string().max(500).nullable().optional(),
   memoryEnabled: z.boolean().default(true),
   allowedTools: z.array(z.string()).nullable().default(null),
@@ -239,6 +249,9 @@ const pipelineSchema = z.object({
         agentId: z.string(),
         skillId: z.string().nullable().default(null),
         promptTemplate: z.string().min(1).max(50000),
+        /* Route cette étape vers d'autres fournisseurs que ceux de l'agent :
+           c'est ce qui rend un workflow hétérogène sans dupliquer les agents. */
+        resiliencePolicyId: z.string().max(60).nullable().default(null),
       }),
     )
     .min(1),
@@ -286,6 +299,35 @@ const settingsSchema = z.object({
   approvalTimeoutSec: z.number().int().min(30).max(86400).optional(),
   maxConcurrentRuns: z.number().int().min(1).max(32).optional(),
   maxAgentDepth: z.number().int().min(0).max(5).optional(),
+  defaultResiliencePolicyId: z.string().max(60).nullable().optional(),
+});
+
+const peerSchema = z.object({
+  /* Ni arobase ni espace : ce nom sert dans une cible « agent@pair ». */
+  name: z
+    .string()
+    .min(1)
+    .max(40)
+    .regex(/^[^@\s]+$/, 'Ni arobase ni espace : ce nom sert dans une cible « agent@pair »'),
+  baseUrl: z.string().url().max(300),
+  /* Le NOM de la variable qui porte le jeton, jamais le jeton : celui d'un pair
+     ouvre son API complète. */
+  tokenEnv: z
+    .string()
+    .regex(/^[A-Z][A-Z0-9_]{2,80}$/, 'Nom de variable d’environnement attendu (MAJUSCULES)'),
+  enabled: z.boolean().default(true),
+  maxConcurrent: z.number().int().min(1).max(20).default(2),
+});
+
+const heartbeatSchema = z.object({
+  enabled: z.boolean().optional(),
+  agentId: z.string().max(60).nullable().optional(),
+  cronExpr: z.string().min(5).max(120).optional(),
+  /* Plafond borné haut : au-delà d'un battement par minute sur la journée, ce
+     n'est plus un plafond. */
+  dailyMax: z.number().int().min(1).max(1440).optional(),
+  skipWhenBusy: z.boolean().optional(),
+  skipUnderQuotaPressure: z.boolean().optional(),
 });
 
 /**
@@ -436,6 +478,10 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
         origin: 'manual',
         resumeSessionId,
         engineOverride: input.engine ?? null,
+        /* Sauts hérités d'une délégation fédérée. Sans cette lecture, un run
+           créé par une voisine repartirait de zéro et un aller-retour entre
+           deux machines ne serait borné par rien. */
+        federationHops: readHops(req.headers as Record<string, unknown>),
       }),
     );
     reply.code(201);
@@ -755,6 +801,9 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
         pluginIds: [],
         mcpServerIds: [],
         ragCollectionIds: [],
+        /* Un agent importé hérite de la politique par défaut de l'instance : lui
+           en imposer une ici ferait un choix que l'opérateur n'a pas fait. */
+        resiliencePolicyId: null,
         parentAgentId: body.parentAgentId ?? null,
         memoryEnabled: true,
         allowedTools: declaredTools.length > 0 ? declaredTools : null,
@@ -1194,5 +1243,65 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
   app.patch('/api/settings', async (req) => {
     const patch = parseOr400(settingsSchema, req.body);
     return s.store.patchSettings(patch);
+  });
+
+  // -- Fédération ------------------------------------------------------------
+
+  app.get('/api/peers', async () => s.federation.list());
+
+  app.post('/api/peers', async (req, reply) => {
+    const input = parseOr400(peerSchema, req.body);
+    reply.code(201);
+    return badRequestOn(() => s.federation.create(input));
+  });
+
+  app.patch('/api/peers/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const patch = parseOr400(patchOf(peerSchema), req.body);
+    const peer = badRequestOn(() => s.federation.update(id, patch));
+    if (!peer) return reply.code(404).send({ error: 'Pair introuvable' });
+    return peer;
+  });
+
+  app.delete('/api/peers/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    if (!s.federation.remove(id)) return reply.code(404).send({ error: 'Pair introuvable' });
+    return { ok: true };
+  });
+
+  /** Vérifie joignabilité **et** jeton : les deux pannes de mise en place. */
+  app.post('/api/peers/:id/test', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const peer = await s.federation.test(id);
+    if (!peer) return reply.code(404).send({ error: 'Pair introuvable' });
+    return peer;
+  });
+
+  // -- Battement de cœur -----------------------------------------------------
+
+  app.get('/api/heartbeat', async () => ({
+    config: s.heartbeat.config(),
+    nextBeatAt: s.heartbeat.nextBeatAt(),
+    beats: s.heartbeat.beats(20),
+  }));
+
+  app.patch('/api/heartbeat', async (req) => {
+    const patch = parseOr400(heartbeatSchema, req.body);
+    /* Expression invalide et rythme trop rapproché remontent tous deux en 400
+       avec leur motif : ce sont des règles
+       métier, pas une panne, et l'opérateur doit savoir pourquoi son rythme est
+       refusé. */
+    return badRequestOn(() => s.heartbeat.update(patch));
+  });
+
+  /** État des lieux tel que l'agent le verra — pour juger avant d'activer. */
+  app.get('/api/heartbeat/situation', async () => s.heartbeat.situation());
+
+  app.post('/api/heartbeat/beat', async () => s.heartbeat.beat(true));
+
+  registerProviderRoutes(app, {
+    store: s.store,
+    providers: s.providers,
+    handoffs: s.handoffs,
   });
 }

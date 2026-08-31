@@ -20,16 +20,25 @@ import { TaskService } from './kanban.ts';
 import { Metrics } from './metrics.ts';
 import { ApprovalBroker } from './permissions.ts';
 import { PipelineService } from './pipelines.ts';
+import { HeartbeatService } from './heartbeat.ts';
+import { FederationService } from './federation.ts';
+import { ExternalSessionService } from './mcp-external.ts';
 import { registerMcpGateway } from './mcp-http.ts';
 import { McpRegistry } from './mcp-registry.ts';
 import { PluginService } from './plugins.ts';
+import { HandoffService } from './providers/handoff.ts';
+import { ProviderService } from './providers/registry.ts';
 import { RagService } from './rag.ts';
 import { SessionRadar } from './radar.ts';
 import { registerRoutes } from './routes.ts';
 import { RunEngine } from './runs.ts';
 import { Scheduler } from './scheduler.ts';
 import { SkillRegistry } from './skills.ts';
-import { TelegramBot } from './telegram.ts';
+import { ChannelRegistry } from './channels/registry.ts';
+import { registerInboundRoutes } from './channels/inbound.ts';
+import { SlackChannel, slackConfigFromEnv } from './channels/slack.ts';
+import { TelegramChannel } from './channels/telegram.ts';
+import { WebhookChannel, webhookConfigFromEnv } from './channels/webhook.ts';
 import { TmuxBridge } from './tmux.ts';
 import { nowIso } from './util.ts';
 
@@ -62,6 +71,8 @@ const tmux = new TmuxBridge();
 const pluginService = new PluginService(config, store, bus);
 const mcpRegistry = new McpRegistry(store, bus);
 const ragService = new RagService(store, bus, agents);
+const providers = new ProviderService(store, bus, config);
+const handoffs = new HandoffService(store, bus, providers);
 const engine = new RunEngine(
   store,
   bus,
@@ -74,16 +85,32 @@ const engine = new RunEngine(
   pluginService,
   mcpRegistry,
   ragService,
+  providers,
+  handoffs,
 );
+const externalSessions = new ExternalSessionService(store, bus);
+const heartbeat = new HeartbeatService({ store, bus, agents, engine, providers });
+/* Branchée après le moteur : celui-ci en a besoin pour ses outils de contrôle,
+   et la passer au constructeur créerait une dépendance circulaire. */
+const federation = new FederationService(store, bus);
+engine.attachFederation(federation);
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
-const telegram = new TelegramBot(config, store, bus, engine, agents, approvals);
+const telegram = new TelegramChannel(config, store, bus, engine, agents, approvals);
+const slack = new SlackChannel(slackConfigFromEnv(), store, bus, engine, agents, approvals);
+const channels = new ChannelRegistry(
+  [telegram, slack, new WebhookChannel(webhookConfigFromEnv(), bus)],
+  bus,
+  { store, agents, engine },
+);
 const connectors = new ConnectorRegistry();
 const radar = new SessionRadar(config, store, bus, agents);
 
 skills.syncAllWorkspaces();
 scheduler.init();
-telegram.start();
+channels.start();
+externalSessions.start();
+heartbeat.start();
 
 // ---------------------------------------------------------------------------
 // HTTP + WebSocket
@@ -201,9 +228,20 @@ registerRoutes(app, {
   rag: ragService,
   radar,
   tmux,
+  providers,
+  handoffs,
+  heartbeat,
+  federation,
   telegramEnabled: telegram.enabled,
   startedAt,
 });
+
+/*
+ * Canaux entrants (Slack…). Comme /mcp, déclarés avant le front statique dont
+ * le repli SPA capterait autrement /hooks — un webhook recevrait une page HTML
+ * en guise de réponse, et le diagnostic serait pénible.
+ */
+await registerInboundRoutes(app, channels, bus);
 
 /*
  * Passerelle MCP : les outils Maestro pour les clients tiers (Codex, OpenCode,
@@ -216,6 +254,17 @@ registerMcpGateway(app, {
   bus,
   listServers: () => mcpRegistry.listRaw(),
   version: config.version,
+  /* Lot A2 : les clients tiers accèdent au kanban, à la délégation et à la
+     mémoire, sous une session visible et avec de vraies approbations. */
+  control: {
+    tasks,
+    agents,
+    bus,
+    engine,
+    maxAgentDepth: () => store.getSettings().maxAgentDepth,
+  },
+  sessions: externalSessions,
+  approvals,
 });
 
 // Front statique (build de production) avec repli SPA.
@@ -226,7 +275,8 @@ if (existsSync(join(webDist, 'index.html'))) {
     if (
       req.raw.url?.startsWith('/api/') ||
       req.raw.url?.startsWith('/ws') ||
-      req.raw.url?.startsWith('/mcp')
+      req.raw.url?.startsWith('/mcp') ||
+      req.raw.url?.startsWith('/hooks/')
     ) {
       return reply.code(404).send({ error: 'Introuvable' });
     }
@@ -237,12 +287,24 @@ if (existsSync(join(webDist, 'index.html'))) {
 metrics.start();
 radar.start();
 
+/**
+ * Arrêt propre, et une seule fois.
+ *
+ * Le garde d'idempotence compte dès que Maestro tourne comme service : un
+ * gestionnaire de service qui redémarre envoie SIGTERM puis, s'il trouve le
+ * processus encore vivant, recommence. Sans ce garde, la seconde passe fermait
+ * une base déjà fermée et transformait un arrêt propre en plantage — donc en
+ * redémarrage compté comme un échec.
+ */
+let stopping = false;
 const shutdown = async (): Promise<void> => {
+  if (stopping) return;
+  stopping = true;
   bus.log('warn', 'server', 'Arrêt de Maestro…');
   metrics.stop();
   radar.stop();
   scheduler.shutdown();
-  telegram.stop();
+  channels.stop();
   engine.shutdown();
   await app.close();
   store.close();
@@ -252,15 +314,29 @@ process.on('SIGINT', () => void shutdown());
 process.on('SIGTERM', () => void shutdown());
 
 try {
-  await app.listen({ port: config.port, host: '0.0.0.0' });
+  await app.listen({ port: config.port, host: config.host });
   bus.log('success', 'server', `Maestro v${config.version} démarré sur le port ${config.port}`);
   console.log(`\n  🎛  Maestro v${config.version}`);
   console.log(`  ➜  Interface : http://localhost:${config.port}`);
-  console.log(`  ➜  Jeton     : ${config.authToken}`);
+  /*
+   * Le jeton ne s'affiche qu'en lancement interactif.
+   *
+   * Constaté en installant Maestro comme service : la bannière part dans le
+   * journal systemd, qui est persistant et lisible au-delà de l'utilisateur
+   * courant. Un secret d'accès complet à l'API n'a rien à y faire. Sur un
+   * terminal, l'afficher reste ce qu'on veut — c'est même le seul moment où on
+   * en a besoin.
+   */
+  if (process.stdout.isTTY) {
+    console.log(`  ➜  Jeton     : ${config.authToken}`);
+  } else {
+    console.log(`  ➜  Jeton     : dans ${join(config.dataDir, 'token')} (masqué hors terminal)`);
+  }
   console.log(`  ➜  Données   : ${config.dataDir}`);
   console.log(`  ➜  MCP       : http://localhost:${config.port}/mcp (Bearer)`);
+  const active = channels.list();
   console.log(
-    `  ➜  Telegram  : ${telegram.enabled ? 'actif' : 'inactif (TELEGRAM_BOT_TOKEN absent)'}\n`,
+    `  ➜  Canaux    : ${active.length > 0 ? active.map((c) => c.label).join(', ') : 'aucun (TELEGRAM_BOT_TOKEN et MAESTRO_WEBHOOK_URL absents)'}\n`,
   );
 } catch (err) {
   console.error('Démarrage impossible :', err);

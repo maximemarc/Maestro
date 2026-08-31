@@ -24,6 +24,9 @@ import type {
   SkillDef,
   TmuxSessionInfo,
 } from './types.ts';
+import type { ProviderAccount, ResiliencePolicy, RunAttempt, SessionHandoff } from './providers.ts';
+import type { Beat } from './heartbeat.ts';
+import type { FederatedPeer } from './federation.ts';
 
 // ---------------------------------------------------------------------------
 // WebSocket : événements serveur → client
@@ -54,6 +57,20 @@ export type ServerEvent =
   | { type: 'rag.updated'; payload: RagCollection }
   | { type: 'rag.deleted'; payload: { id: string } }
   | { type: 'metrics.tick'; payload: MetricsSnapshot }
+  | { type: 'provider.updated'; payload: ProviderAccount }
+  | { type: 'provider.deleted'; payload: { id: string } }
+  | { type: 'policy.updated'; payload: ResiliencePolicy }
+  | { type: 'policy.deleted'; payload: { id: string } }
+  /* La tentative est poussée séparément du run : c'est le seul moyen de voir
+     une bascule *pendant* qu'elle se produit, et non après coup dans un
+     historique. */
+  | { type: 'run.attempt'; payload: RunAttempt }
+  | { type: 'handoff.created'; payload: SessionHandoff }
+  /* Poussé aussi pour un battement **sauté** : c'est le cas le plus fréquent, et
+     celui qui explique pourquoi l'orchestrateur ne fait rien. */
+  | { type: 'heartbeat.beat'; payload: Beat }
+  | { type: 'peer.updated'; payload: FederatedPeer }
+  | { type: 'peer.deleted'; payload: { id: string } }
   | { type: 'log'; payload: LogLine };
 
 export type ServerEventType = ServerEvent['type'];

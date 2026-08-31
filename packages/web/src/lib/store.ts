@@ -20,6 +20,10 @@ import type {
   ServerEvent,
   ServerInfo,
   SkillDef,
+  ProviderAccount,
+  ResiliencePolicy,
+  RunAttempt,
+  SessionHandoff,
 } from '@maestro/shared';
 import { api } from './api';
 
@@ -78,6 +82,14 @@ export interface MaestroStore {
   mcpServers: McpServerDef[];
   /** Collections RAG, avec leurs compteurs de documents et de morceaux. */
   ragCollections: RagCollection[];
+  /** Comptes de fournisseurs et leur santé, tenus à jour par événement. */
+  accounts: ProviderAccount[];
+  /** Politiques de résilience disponibles. */
+  policies: ResiliencePolicy[];
+  /** Tentatives par run — alimentées en direct pour les transcripts ouverts. */
+  runAttempts: Record<string, RunAttempt[]>;
+  /** Derniers résumés de reprise capturés. */
+  handoffs: SessionHandoff[];
   /** Notifications transitoires, rendues par ToastHost. */
   toasts: Toast[];
 
@@ -98,6 +110,10 @@ export const useStore = create<MaestroStore>((set, get) => ({
   toasts: [],
   mcpServers: [],
   ragCollections: [],
+  accounts: [],
+  policies: [],
+  runAttempts: {},
+  handoffs: [],
   metrics: null,
   agents: [],
   runs: [],
@@ -127,6 +143,8 @@ export const useStore = create<MaestroStore>((set, get) => ({
       pipelineRuns,
       mcpServers,
       ragCollections,
+      accounts,
+      policies,
     ] = await Promise.all([
       api.overview(),
       api.listAgents(),
@@ -139,6 +157,8 @@ export const useStore = create<MaestroStore>((set, get) => ({
       api.listPipelineRuns(),
       api.listMcpServers(),
       api.listRagCollections(),
+      api.listAccounts(),
+      api.listPolicies(),
     ]);
     set({
       bootstrapped: true,
@@ -155,6 +175,8 @@ export const useStore = create<MaestroStore>((set, get) => ({
       pipelineRuns,
       mcpServers,
       ragCollections,
+      accounts,
+      policies,
     });
   },
 
@@ -258,6 +280,37 @@ export const useStore = create<MaestroStore>((set, get) => ({
         set((state) => ({
           ragCollections: state.ragCollections.filter((c) => c.id !== event.payload.id),
         }));
+        break;
+      /* La santé d'un compte change surtout *pendant* un run — un quota qui
+         tombe, une bascule qui réussit. Sans ces événements, la page des
+         fournisseurs afficherait l'état du dernier rechargement. */
+      case 'provider.updated':
+        set((state) => ({ accounts: upsertById(state.accounts, event.payload) }));
+        break;
+      case 'provider.deleted':
+        set((state) => ({ accounts: state.accounts.filter((a) => a.id !== event.payload.id) }));
+        break;
+      case 'policy.updated':
+        set((state) => ({ policies: upsertById(state.policies, event.payload) }));
+        break;
+      case 'policy.deleted':
+        set((state) => ({ policies: state.policies.filter((p) => p.id !== event.payload.id) }));
+        break;
+      /* Les tentatives sont indexées par run : c'est ce qui permet de voir une
+         bascule se produire dans le transcript ouvert, et non après coup. */
+      case 'run.attempt': {
+        const attempt = event.payload;
+        set((state) => {
+          const current = state.runAttempts[attempt.runId] ?? [];
+          const next = current.filter((a) => a.index !== attempt.index);
+          next.push(attempt);
+          next.sort((a, b) => a.index - b.index);
+          return { runAttempts: { ...state.runAttempts, [attempt.runId]: next } };
+        });
+        break;
+      }
+      case 'handoff.created':
+        set((state) => ({ handoffs: [event.payload, ...state.handoffs].slice(0, 100) }));
         break;
       case 'tmux.updated':
         break;

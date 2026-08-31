@@ -14,20 +14,29 @@
  * - **RAG** — les collections n'ont besoin que d'une liste d'autorisation ;
  * - **outils maison** — un appel HTTP paramétré, sans état de session.
  *
- * Sont hors périmètre, et pourquoi :
+ * ## Ce que le lot A2 a changé
  *
- * - les outils de contrôle (`maestro_task_*`, `send_to_agent`, `memory_save`)
- *   exigent un `RunContext { runId, agent, depth }` qui n'existe pas hors run.
- *   Les exposer sans identité de run ferait agir un agent tiers dans l'angle
- *   mort de l'orchestrateur : invisible dans Mission Control, non comptabilisé,
- *   non annulable ;
- * - les serveurs MCP *externes* déclarés dans le registre ne sont pas relayés.
- *   Un client tiers sait les déclarer lui-même ; en faire un proxy ajouterait un
- *   saut réseau et une couche de pannes pour aucun gain ;
- * - les outils maison marqués `requiresApproval` sont **refusés**, pas exécutés.
- *   Un client tiers ne passe pas par `canUseTool` : l'exécuter reviendrait à
- *   contourner en silence une approbation que l'interface promet. Le refus est
- *   explicite, avec le motif — la levée viendra avec le broker côté serveur.
+ * Deux limitations assumées au départ sont levées, et une reste.
+ *
+ * - **Les outils de contrôle** (`task_create`, `task_update`, `send_to_agent`,
+ *   `memory_save`) sont exposés dès qu'un agent est identifié. Le contexte de
+ *   run qui leur manquait vient d'une **session externe** : un run d'origine
+ *   `external` ouvert au premier geste, qui rend la session visible dans
+ *   Mission Control, donne un parent aux délégations, et se laisse annuler.
+ * - **Les outils sous approbation** ne sont plus refusés d'office : ils passent
+ *   par le broker, exactement comme depuis un agent Maestro. L'appel attend une
+ *   décision humaine, prise depuis le web ou Telegram. C'est plus lent qu'un
+ *   refus, et c'est la seule façon de tenir la promesse de l'interface sans
+ *   fermer la porte.
+ * - **Les serveurs MCP externes** du registre ne sont toujours pas relayés : un
+ *   client tiers sait les déclarer lui-même, et en faire un proxy ajouterait un
+ *   saut réseau et une couche de pannes pour aucun gain.
+ *
+ * 🔒 Ce que la passerelle ne peut pas offrir, et qu'il ne faut pas laisser
+ * croire : elle ne voit **que les appels qui lui sont adressés**. Un client
+ * tiers qui lit et écrit des fichiers le fait avec ses propres outils, hors de
+ * portée de Maestro. La gouvernance porte sur le canal Maestro, pas sur la
+ * machine.
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
@@ -35,9 +44,24 @@ import {
   ListToolsRequestSchema,
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
-import type { AgentConfig, McpServerDef, RagCollection } from '@maestro/shared';
+import { KANBAN_COLUMNS } from '@maestro/shared';
+import type { AgentConfig, KanbanColumn, McpServerDef, RagCollection } from '@maestro/shared';
 import type { AgentService } from './agents.ts';
 import type { Bus } from './bus.ts';
+import {
+  ActionError,
+  createTask,
+  delegate,
+  MEMORY_SAVE_DESCRIPTION,
+  saveMemory,
+  SEND_TO_AGENT_DESCRIPTION,
+  TASK_CREATE_DESCRIPTION,
+  TASK_UPDATE_DESCRIPTION,
+  updateTask,
+  type ControlDeps,
+} from './mcp-actions.ts';
+import type { ExternalSessionService } from './mcp-external.ts';
+import type { ApprovalBroker } from './permissions.ts';
 import { runAction } from './mcp-registry.ts';
 import {
   RAG_COLLECTIONS_DESCRIPTION,
@@ -75,6 +99,16 @@ export interface GatewayDeps {
   /** Définitions maison brutes (secrets non masqués) : `McpRegistry.listRaw`. */
   listServers: () => McpServerDef[];
   version: string;
+  /**
+   * Actions de contrôle et session externe.
+   *
+   * Optionnels : le pont stdio et les tests de périmètre construisent une
+   * passerelle sans eux, et doivent continuer de fonctionner — sans ces
+   * dépendances, les outils de contrôle ne sont simplement pas annoncés.
+   */
+  control?: ControlDeps;
+  sessions?: ExternalSessionService;
+  approvals?: ApprovalBroker;
 }
 
 /**
@@ -161,9 +195,82 @@ interface ToolDescriptor {
   inputSchema: Record<string, unknown>;
 }
 
+/**
+ * Outils de contrôle, annoncés seulement quand un agent est identifié.
+ *
+ * Sans en-tête d'agent, ils n'ont pas de sens : au nom de qui la carte serait
+ * créée, dans quelle mémoire la note serait écrite ? Les annoncer quand même
+ * ferait échouer chaque appel après coup, ce qui est la pire façon de dire non.
+ */
+function controlTools(): ToolDescriptor[] {
+  const column = {
+    type: 'string',
+    enum: [...KANBAN_COLUMNS],
+    description: 'Colonne du kanban.',
+  };
+  return [
+    {
+      name: 'task_create',
+      description: TASK_CREATE_DESCRIPTION,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          title: { type: 'string', minLength: 1, maxLength: 200 },
+          description: { type: 'string', maxLength: 4000 },
+          column,
+        },
+        required: ['title'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'task_update',
+      description: TASK_UPDATE_DESCRIPTION,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          taskId: { type: 'string' },
+          column,
+          comment: { type: 'string', maxLength: 2000 },
+        },
+        required: ['taskId'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'send_to_agent',
+      description: SEND_TO_AGENT_DESCRIPTION,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          agentName: { type: 'string' },
+          prompt: { type: 'string', minLength: 1 },
+          wait: { type: 'boolean', default: false },
+        },
+        required: ['agentName', 'prompt'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'memory_save',
+      description: MEMORY_SAVE_DESCRIPTION,
+      inputSchema: {
+        type: 'object',
+        properties: { content: { type: 'string', minLength: 1, maxLength: 4000 } },
+        required: ['content'],
+        additionalProperties: false,
+      },
+    },
+  ];
+}
+
+const CONTROL_TOOL_NAMES = new Set(['task_create', 'task_update', 'send_to_agent', 'memory_save']);
+
 /** Catalogue exposé au client, dans l'ordre où il est le plus utile à lire. */
-export function listGatewayTools(scope: GatewayScope): ToolDescriptor[] {
+export function listGatewayTools(scope: GatewayScope, deps?: GatewayDeps): ToolDescriptor[] {
   const tools: ToolDescriptor[] = [];
+
+  if (scope.agent && deps?.control && deps.sessions) tools.push(...controlTools());
 
   /* Les outils RAG n'apparaissent que si au moins une collection est
      accessible : un outil qui ne peut que répondre « aucune base » coûte du
@@ -205,8 +312,11 @@ export function listGatewayTools(scope: GatewayScope): ToolDescriptor[] {
       /* L'outil sous approbation est annoncé, pas caché : le modèle doit
          pouvoir dire à l'utilisateur que l'action existe mais passe par
          Maestro, au lieu de conclure qu'elle est impossible. */
+      /* L'annonce dit ce qui va se passer : l'appel n'est plus refusé, il
+         attend une décision humaine. Le modèle doit le savoir avant d'appeler,
+         sinon il conclura à une panne au bout de quelques minutes. */
       const suffix = toolDef.requiresApproval
-        ? ' [approbation humaine requise : appel refusé depuis un client externe]'
+        ? " [approbation humaine requise : l'appel attend une décision dans Maestro]"
         : '';
       tools.push({
         name: `${def.slug}${NAME_SEPARATOR}${toolDef.name}`,
@@ -249,6 +359,8 @@ export async function callGatewayTool(
   name: string,
   args: Record<string, unknown>,
 ): Promise<GatewayToolResult> {
+  if (CONTROL_TOOL_NAMES.has(name)) return await callControlTool(deps, scope, name, args);
+
   if (name === 'rag_collections') {
     if (scope.collections.length === 0) return failure('Aucune base documentaire accessible.');
     return text(formatCollectionList(scope.collections));
@@ -284,9 +396,34 @@ export async function callGatewayTool(
   if (!toolDef) return failure(`Outil inconnu : ${name}`);
 
   if (toolDef.requiresApproval) {
-    return failure(
-      `L'outil ${name} exige une approbation humaine, que Maestro ne peut pas demander pour un client externe. Passe par un agent Maestro pour cette action.`,
+    /*
+     * L'approbation passe par le même broker que pour un agent Maestro : même
+     * file, même historique, même résolution web ou Telegram. Ce qu'il faut
+     * pour cela, c'est une identité et un run — d'où le refus quand la session
+     * externe n'est pas disponible. Exécuter sans elle contournerait en silence
+     * une garantie affichée dans l'interface.
+     */
+    if (!scope.agent || !deps.approvals || !deps.sessions) {
+      return failure(
+        `L'outil ${name} exige une approbation humaine. Déclare l'agent au nom duquel tu agis (en-tête ${AGENT_HEADER}) pour que Maestro puisse la demander.`,
+      );
+    }
+    const session = deps.sessions.touch(scope.agent);
+    const { decision, resolvedBy, note } = await deps.approvals.requestHumanApproval(
+      session.id,
+      scope.agent,
+      name,
+      args,
     );
+    deps.sessions.record(
+      session,
+      name,
+      decision === 'allow' ? 'ok' : 'refusé',
+      `par ${resolvedBy}`,
+    );
+    if (decision !== 'allow') {
+      return failure(note ?? `Refusé par l'opérateur (${resolvedBy}).`);
+    }
   }
 
   try {
@@ -303,6 +440,87 @@ export async function callGatewayTool(
 }
 
 /**
+ * Exécute un outil de contrôle au nom de l'agent identifié.
+ *
+ * L'ordre compte : la session externe est ouverte **avant** l'action, jamais
+ * après. C'est elle qui donne son parent à une délégation ; l'ouvrir ensuite
+ * laisserait un run orphelin, non annulable en cascade — exactement le trou que
+ * ce lot est censé combler.
+ */
+async function callControlTool(
+  deps: GatewayDeps,
+  scope: GatewayScope,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<GatewayToolResult> {
+  if (!scope.agent) {
+    return failure(
+      `L'outil ${name} agit au nom d'un agent Maestro : déclare-le avec l'en-tête ${AGENT_HEADER}.`,
+    );
+  }
+  if (!deps.control || !deps.sessions) {
+    return failure(`L'outil ${name} n'est pas disponible sur cette passerelle.`);
+  }
+
+  const session = deps.sessions.touch(scope.agent);
+  /* Profondeur 0 : une session externe est une racine de délégation, au même
+     titre qu'un run lancé à la main. Les garde-fous anti-cascade s'appliquent
+     ensuite normalement aux runs qu'elle engendre. */
+  const ctx = { runId: session.id, agent: scope.agent, depth: 0 };
+
+  try {
+    let output: string;
+    switch (name) {
+      case 'task_create':
+        output = createTask(deps.control, ctx, {
+          title: String(args.title ?? ''),
+          description: typeof args.description === 'string' ? args.description : '',
+          column: asColumn(args.column),
+        });
+        break;
+      case 'task_update':
+        output = updateTask(deps.control, ctx, {
+          taskId: String(args.taskId ?? ''),
+          column: asColumn(args.column),
+          comment: typeof args.comment === 'string' ? args.comment : undefined,
+        });
+        break;
+      case 'send_to_agent':
+        output = await delegate(deps.control, ctx, {
+          agentName: String(args.agentName ?? ''),
+          prompt: String(args.prompt ?? ''),
+          wait: args.wait === true,
+        });
+        break;
+      case 'memory_save':
+        output = saveMemory(deps.control, ctx, { content: String(args.content ?? '') });
+        break;
+      default:
+        return failure(`Outil inconnu : ${name}`);
+    }
+    deps.sessions.record(session, name, 'ok');
+    return text(output);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    deps.sessions.record(session, name, 'échec', message);
+    /* Une erreur métier revient au modèle pour qu'il corrige ; une panne est
+       journalisée côté Maestro, sinon le propriétaire du serveur cherchera le
+       problème chez le client. */
+    if (!(err instanceof ActionError)) {
+      deps.bus.log('warn', 'mcp', `Passerelle : ${name} en échec — ${message}`);
+    }
+    return failure(message);
+  }
+}
+
+/** Colonne de kanban reçue d'un client tiers, ou `undefined` si elle n'en est pas une. */
+function asColumn(value: unknown): KanbanColumn | undefined {
+  return typeof value === 'string' && (KANBAN_COLUMNS as readonly string[]).includes(value)
+    ? (value as KanbanColumn)
+    : undefined;
+}
+
+/**
  * Construit un serveur MCP standard pour un périmètre donné.
  *
  * Un serveur par requête HTTP : c'est le mode sans état du transport Streamable
@@ -316,13 +534,13 @@ export function createGatewayServer(deps: GatewayDeps, scope: GatewayScope): Ser
     {
       capabilities: { tools: {} },
       instructions: scope.agent
-        ? `Outils Maestro délégués au nom de l'agent « ${scope.agent.name} ».`
-        : 'Outils Maestro : bases documentaires (RAG) et outils maison configurés dans Maestro.',
+        ? `Outils Maestro délégués au nom de l'agent « ${scope.agent.name} ». Les actions de contrôle (kanban, délégation, mémoire) sont journalisées dans une session visible dans Mission Control.`
+        : 'Outils Maestro : bases documentaires (RAG) et outils maison configurés dans Maestro. Déclare un agent (en-tête x-maestro-agent) pour accéder au kanban, à la délégation et à la mémoire.',
     },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: listGatewayTools(scope),
+    tools: listGatewayTools(scope, deps),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> =>

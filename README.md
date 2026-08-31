@@ -7,10 +7,12 @@ tu crées des agents spécialisés, tu leur confies des tâches — à la demand
 par cron ou depuis Telegram — et tu supervises tout en temps réel : flux de messages,
 approbations d'outils, tokens et coûts.
 
-> Prérequis d'authentification : Maestro pilote **Claude Code** via le
-> [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk). Il réutilise
+> Prérequis d'authentification : par défaut, Maestro pilote **Claude Code** via le
+> [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) et réutilise
 > l'authentification existante de la machine (abonnement Claude connecté via `claude`,
-> ou variable `ANTHROPIC_API_KEY`).
+> ou variable `ANTHROPIC_API_KEY`). Il sait aussi répartir ses runs sur **plusieurs
+> comptes** et sur **d'autres moteurs** — Codex, OpenCode, une API HTTP — avec repli
+> automatique : voir [Fournisseurs, comptes et repli](#fournisseurs-comptes-et-repli).
 
 ---
 
@@ -62,6 +64,91 @@ approbations d'outils, tokens et coûts.
   délégations comprises — deux sessions ne partagent jamais un workspace. Seule une
   délégation bloquante (`wait=true`) dépasse le plafond global, le temps que le
   parent l'attende ; une délégation asynchrone y est soumise, ce qui borne le fan-out
+
+### Fournisseurs, comptes et repli
+
+Un run n'est plus « une session Claude Code » mais **une tentative sur un compte
+d'un fournisseur**. Cette indirection est ce qui permet de tenir quand un quota
+tombe, et d'exécuter ailleurs que chez Anthropic.
+
+- **Comptes** — un compte est une identité d'exécution :
+  - _profil d'abonnement_ : un `CLAUDE_CONFIG_DIR` dédié, avec sa propre session
+    et donc **son propre quota**. C'est le mécanisme du multi-comptes Claude ;
+  - _clé d'API_ : le **nom** d'une variable d'environnement du serveur. 🔒 La
+    valeur n'entre jamais en base et n'est jamais renvoyée à l'interface ;
+  - _environnement ambiant_ : le comportement d'avant, sans repli.
+- **Fournisseurs** — `claude-sdk` (Claude Code), `codex-cli`, `opencode-cli`, et
+  `http-api` (Anthropic Messages ou tout service compatible OpenAI : OpenRouter,
+  Ollama, LM Studio).
+- **Politiques de résilience** — une liste ordonnée de comptes plus des bornes :
+  essais par compte, essais au total, backoff exponentiel avec jitter, attente
+  maximale pour un quota, seuil de résumé. Attachable à un agent, à une étape de
+  pipeline, ou à l'instance entière.
+- **Classification de l'échec** — c'est elle qui décide de la suite, parce que
+  la bonne réaction dépend entièrement de la nature de la panne : limite d'usage,
+  débit limité, fournisseur saturé, authentification invalide, contexte dépassé,
+  incident réseau, garde-fou Maestro. Chaque tentative affiche la classe retenue.
+- **Arbitrage face à un quota : avancer plutôt qu'attendre.** On bascule si un
+  compte peut prendre le relais ; on n'attend qu'à défaut, et seulement si la
+  réouverture est _annoncée_ (en-tête `retry-after`, ou horodatage joint par
+  Claude Code). Une heure écrite en prose n'est jamais interprétée : un délai
+  deviné vaut moins qu'un échec franc.
+- **Anticipation des quotas** — plutôt que d'attendre le refus, Maestro mesure
+  la consommation de chaque compte sur une fenêtre glissante (5 h par défaut,
+  réglable) et **préfère un compte plus calme** quand celui de tête approche de
+  sa limite. La bascule se fait alors _avant_ le mur : aucun run entamé, aucun
+  contexte perdu, aucun résumé à reconstruire.
+  - _D'où vient la mesure_ : pour un compte Claude, des **transcripts** du
+    profil — la seule source qui voie aussi les sessions lancées à la main hors
+    de Maestro, qui consomment pourtant le même quota. Pour une API HTTP, des
+    tentatives enregistrées. Un moteur CLI tiers ne rapporte pas ses tokens :
+    l'interface le dit au lieu d'afficher une jauge à zéro.
+  - _D'où vient le plafond_ : de ce que tu déclares, sinon de ce que Maestro
+    **apprend** — la consommation constatée au moment où ce compte a heurté sa
+    limite. Aucun fournisseur ne publie ce chiffre pour un abonnement ; plutôt
+    que d'en inventer un, Maestro retient celui qu'il a vu.
+  - _Ce qu'un plafond estimé ne fait jamais_ : refuser un compte. Il ne fait que
+    le mettre de côté s'il existe une alternative. Quand tous les comptes sont
+    chargés, l'ordre que tu as déclaré reprend la main.
+  - Le cache de lecture est exclu du total : facturé une fraction du prix, il
+    ferait paraître saturé un compte qui ne fait que relire un gros contexte.
+    Mesuré en conditions réelles, l'écart est d'un facteur 35.
+
+- **Reprise ailleurs (handoff)** — au franchissement d'un seuil, tant qu'un
+  modèle est joignable, un résumé structuré du travail est rédigé et réinjecté
+  en préambule de la tentative suivante. Au blocage, un filet de sécurité
+  reconstruit ce résumé **mécaniquement** depuis le journal d'exécution : quand
+  tous les comptes sont en quota, plus personne ne peut résumer. Un résumé
+  dégradé est signalé comme tel, et versé au `MEMORY.md` de l'agent. Le seuil se
+  mesure sur le budget de tokens de l'agent **ou** sur le remplissage de la
+  fenêtre du compte — cette seconde jauge est la seule qui existe quand l'agent
+  n'a pas de budget déclaré, c'est-à-dire le cas courant.
+- **Vue par tentative** — le détail d'un run montre qui a essayé, ce qui a
+  échoué, combien de temps on a attendu et où c'est reparti. Cet encart
+  n'apparaît qu'à partir de la deuxième tentative.
+
+> ⚠️ **Ce qu'on perd hors du SDK Claude, et qui est affiché, pas masqué.** Les
+> moteurs CLI tiers n'exposent aucun équivalent de `canUseTool` : la politique
+> d'approbation d'un agent y devient **déclarative**, Maestro ne peut plus
+> l'appliquer. Le coût n'est pas rapporté, et le transcript est plus grossier.
+> Le fournisseur `http-api`, lui, n'a aucun outil et ne modifie pas le
+> workspace — c'est un repli de rédaction, pas un moteur de codage.
+
+> ℹ️ **L'invocation des moteurs CLI n'est pas codée en dur.** Les options non
+> interactives de Codex et d'OpenCode changent d'une version à l'autre : une
+> ligne de commande figée marcherait chez celui qui l'a écrite et échouerait
+> ailleurs. Maestro lit donc `<outil> --help` sur la machine et **n'émet que ce
+> que le binaire déclare** — sous-commande, `--json`, `--model` : chaque élément
+> n'est ajouté que s'il y figure. Une option disparue est ignorée, une option
+> renommée n'est pas inventée, et il n'y a rien à régler. L'invocation déduite
+> est affichée sur la page Fournisseurs ; le champ « Arguments » d'un compte ne
+> sert qu'à imposer sa propre ligne de commande.
+>
+> 🔒 Ce qui n'est **jamais** ajouté automatiquement : les options
+> d'auto-approbation (`--full-auto` et équivalentes). Elles sont repérées et
+> signalées, pas activées — sur un moteur où Maestro n'intercepte déjà plus les
+> outils, cumuler le second abandon serait une décision de sécurité prise par
+> une heuristique.
 
 ### Approbations (human-in-the-loop)
 
@@ -148,20 +235,37 @@ HTTP. Il se configure par variables d'environnement — `MAESTRO_URL`
 }
 ```
 
-**Ce que la passerelle expose** : `rag_collections`, `rag_search`, et les outils
-maison du registre, aplatis en `<serveur>__<outil>` (donc
-`mcp__maestro__crm__lister` vu du modèle).
+**Ce que la passerelle expose** : `rag_collections`, `rag_search`, les outils
+maison du registre aplatis en `<serveur>__<outil>` (donc
+`mcp__maestro__crm__lister` vu du modèle), et — dès qu'un agent est identifié —
+les **outils de contrôle** : `task_create`, `task_update`, `send_to_agent`,
+`memory_save`.
 
-**Ce qu'elle n'expose pas, et pourquoi** :
+**Session externe.** Une action de contrôle ouvre un run d'origine `external`,
+au nom de l'agent déclaré. Ce run n'exécute rien : le travail se fait chez le
+client tiers, dont Maestro n'a ni le transcript, ni les tokens, ni le coût. Il
+sert de journal — une ligne dans Mission Control, un parent pour les
+délégations, et une prise pour l'annulation. Il se referme après quinze minutes
+de silence, parce qu'un client tiers ne prévient pas qu'il s'arrête.
 
-- les outils de contrôle (`maestro_task_*`, `send_to_agent`, `memory_save`)
-  exigent un contexte de run — identité, comptabilisation, annulation. Les ouvrir
-  sans ça ferait agir un agent tiers dans l'angle mort de Mission Control ;
-- les serveurs MCP _externes_ du registre ne sont pas relayés : le client tiers
-  sait les déclarer lui-même, un proxy n'ajouterait qu'un saut réseau ;
-- un outil maison marqué **« approbation requise »** est annoncé mais **refusé** :
-  un client externe ne passe par aucun broker, l'exécuter contournerait en
-  silence une approbation que l'interface promet.
+L'annuler **annule en cascade les runs qu'elle a délégués** — c'est le geste
+utile. Elle ne coupe pas le client tiers, que Maestro ne pilote pas : un nouvel
+appel rouvrira une session. Le message d'annulation le dit.
+
+**Approbations.** Un outil maison marqué « approbation requise » passe par le
+même broker que pour un agent Maestro : même file, même historique, même
+résolution depuis le web ou Telegram. L'appel MCP attend la décision — plus lent
+qu'un refus, et seule façon de tenir la promesse de l'interface sans fermer la
+porte. Sans agent identifié, Maestro n'a personne à qui la demander et refuse.
+
+**Ce qu'elle n'expose pas** : les serveurs MCP _externes_ du registre ne sont pas
+relayés — le client tiers sait les déclarer lui-même, un proxy n'ajouterait qu'un
+saut réseau.
+
+> 🔒 Ce que la passerelle **ne peut pas** offrir, et qu'il ne faut pas laisser
+> croire : elle ne voit que les appels qui lui sont adressés. Un client tiers qui
+> lit et écrit des fichiers le fait avec ses propres outils, hors de portée de
+> Maestro. La gouvernance porte sur le canal Maestro, pas sur la machine.
 
 **Périmètre.** Sans en-tête, le client voit tout ce qui est activé — c'est le
 périmètre du jeton, qui ouvre déjà l'API complète. Avec
@@ -233,22 +337,118 @@ définir `VOYAGE_API_KEY` ou `OPENAI_API_KEY` dans l'environnement du serveur :
 - Planification agent + skill + prompt (expressions cron, presets)
 - Run-now, historique, délai max, notification de fin
 
+### Battement de cœur — l'orchestrateur qui délibère
+
+Une routine **déclenche** un prompt écrit d'avance. Un battement dresse un état
+des lieux — runs actifs, approbations en attente, kanban, échecs récents, comptes
+proches de leur limite — le confie à un agent avec ses consignes permanentes
+(`HEARTBEAT.md` dans son workspace), et le laisse **décider s'il y a lieu
+d'agir**, y compris conclure que non. C'est là toute la différence : un cron agit
+toujours.
+
+L'agent agit par ses outils MCP habituels (kanban, délégation, mémoire) : rien de
+spécifique n'est ajouté, donc sa politique d'approbation et ses outils autorisés
+bornent la délibération comme ils bornent le reste.
+
+Les comptes rendus des battements précédents lui sont **réinjectés**. Sans cette
+mémoire, un agent recrée la même carte vingt-quatre fois par jour, faute de
+savoir qu'il l'a déjà créée.
+
+> 🔒 **Un orchestrateur qui délibère dépense des tokens sans qu'on lui ait rien
+> demandé.** C'est un changement de nature, et les garde-fous en sont la
+> condition : désactivé par défaut, agent dédié, plancher de cinq minutes entre
+> deux battements, plafond quotidien, budget de tokens de l'agent comme plafond
+> par battement, rien pendant qu'un run tourne, et le quota cédé au travail
+> demandé par un humain. Un battement qui ne fait rien est un succès, et
+> l'historique le distingue d'un battement qui a agi.
+
 ### Pipelines (chaînes d'agents)
 
 - Étapes séquentielles multi-agents ; variables de gabarit `{{input}}`, `{{prev}}`,
   `{{steps.<nom>}}`
 - Suivi d'exécution étape par étape, sortie de chaque étape consultable
+- **Chaîne hétérogène** : chaque étape peut imposer sa propre politique de
+  résilience, et donc ses propres fournisseurs — rédiger sur un compte
+  d'abonnement, relire sur un autre outil, synthétiser sur une API bon marché,
+  sans dupliquer les agents
 
 ### Délégation inter-agents
 
 - Outil MCP `maestro_send_to_agent` : un agent confie une sous-tâche à un autre
   (asynchrone, ou bloquant avec `wait=true`), profondeur limitée (anti-boucle)
+- **Fédération inter-machines** : écrire `agent@pair` confie la tâche à un agent
+  d'une **autre instance Maestro**. Une instance délègue en étant simplement
+  cliente de sa voisine, par l'API REST qui existe déjà.
+  - _Pairs déclarés, pas découverts_ : une découverte réseau accorderait sa
+    confiance à qui répond, alors que tout le modèle de sécurité repose sur un
+    jeton donné exprès.
+  - _Disjoncteur_ : une voisine éteinte ferait attendre chaque délégation son
+    délai complet — et l'agent qui délègue occupe un slot pendant ce temps. Après
+    trois échecs, le pair est écarté deux minutes et les appels échouent
+    immédiatement, avec leur motif.
+  - _Un seul saut entre machines_, propagé au run distant : un run né d'une
+    délégation fédérée ne peut pas repartir vers une machine. La borne suppose la
+    coopération du pair, ce qui est cohérent — son jeton ouvre déjà son API
+    complète.
+  - 🔒 Le jeton d'un pair est traité comme une clé de fournisseur : la base ne
+    garde que le **nom de la variable d'environnement** qui le porte.
 
-### Telegram
+### Canaux — Telegram, Slack, webhooks
 
-- Bot bidirectionnel : notifications de fin de run, **approbations par boutons**,
-  `/run <agent> <prompt>`, `/status`, `/agents`, `/approvals`
-- Whitelist stricte de chats (`TELEGRAM_CHAT_IDS`)
+Un **canal** relie Maestro à un endroit où des humains regardent. Un message y
+circule sous forme **structurée** — titre, faits, corps, actions — et chaque
+canal le rend selon ses moyens. C'est ce qui permet d'en ajouter un sans
+recopier la logique : décider qu'un run mérite une notification, lister les
+agents, lancer un run depuis un message n'a jamais rien eu de telegramien.
+
+- **Telegram** — bidirectionnel : notifications de fin de run, **approbations par
+  boutons**, `/run <agent> <prompt>`, `/status`, `/agents`, `/approvals`.
+  Whitelist stricte de chats (`TELEGRAM_CHAT_IDS`).
+- **Slack** — bidirectionnel : notifications en blocs, `/maestro status`,
+  `/maestro run <agent> <prompt>`, et **approbations par boutons**. Whitelist
+  stricte de salons (`SLACK_CHANNEL_IDS`). Les deux sens sont indépendants — un
+  espace de travail peut piloter Maestro sans installer de bot émetteur, les
+  réponses partant par le `response_url` de la requête.
+- **Webhook sortant** — Discord, Mattermost, ou tout point d'entrée acceptant du
+  JSON (`MAESTRO_WEBHOOK_URL`). Sans dépendance ni bot à déclarer.
+
+Ils se complètent plus qu'ils ne se ressemblent, et la différence est portée par
+l'interface : un canal **interactif** rend les actions cliquables, un canal
+sortant seul ne le peut pas — il les mentionne alors en texte, parce qu'une
+approbation qui attend sans qu'on sache où la résoudre est pire qu'une
+notification absente.
+
+Slack a servi à éprouver l'abstraction dans la seule direction qui n'avait
+jamais été testée deux fois : la réception. Et elle a tenu — `parseCommand`,
+`runCommand` et `parseApprovalAction` sont repris tels quels, le fichier Slack ne
+contenant que du transport. Un canal sortant de plus n'aurait validé que la
+moitié du contrat.
+
+> 🔒 **La route entrante de Slack est publique, et c'est sans alternative.**
+> Telegram va chercher ses messages : rien n'est exposé. Slack pousse les siens
+> vers une URL qui doit être joignable sans le jeton Maestro — Slack ne le
+> connaît pas et ne peut pas l'apprendre. La **signature HMAC est donc la seule
+> authentification** de `POST /hooks/slack`, d'où trois règles qui ne se
+> négocient pas : sans `SLACK_SIGNING_SECRET` la route **n'existe pas** (aucun
+> mode « ouvert pour tester ») ; un horodatage de plus de cinq minutes est
+> rejeté, sinon une requête valide capturée serait rejouable indéfiniment ; la
+> comparaison est à temps constant, parce qu'un `===` sur un HMAC laisse fuir la
+> signature attendue octet par octet. Et comme pour Telegram, la whitelist
+> s'applique dans les deux sens : une signature valide prouve que Slack parle,
+> pas que la personne a le droit de lancer un run.
+
+> 🔒 **Les réponses aux commandes sont éphémères** — visibles de la seule
+> personne qui a tapé la commande. Ce n'est pas du confort : la sortie d'un run
+> peut porter du code ou des données de dossier, et la déverser dans un salon
+> serait une publication que personne n'a demandée. Les notifications, elles,
+> restent publiques : c'est leur raison d'être.
+
+> 🔒 **Envoyer vers un service tiers, c'est publier.** Le résultat d'un run peut
+> contenir du code, des extraits de dossier, des noms de clients. Le webhook
+> n'envoie donc par défaut **que l'état** — agent, statut, coût. Y ajouter le
+> résultat demande `MAESTRO_WEBHOOK_DETAIL=full` : un choix explicite, pas un
+> défaut qu'on subit. L'URL d'un webhook est elle-même un secret — elle reste en
+> variable d'environnement et n'apparaît dans aucun journal.
 
 ### Analytique & garde-fous
 
@@ -275,6 +475,98 @@ npm start
 
 Au premier démarrage, le serveur affiche le **jeton d'accès** (persisté dans
 `~/.maestro/token`). Ouvre `http://localhost:4520` (ou `:4521` en dev) et colle-le.
+
+> Le jeton n'est affiché **que sur un terminal**. Lancé comme service, Maestro
+> indique où le lire : la bannière part sinon dans le journal du système, qui est
+> persistant et lisible au-delà de l'utilisateur courant.
+
+### Interface installable
+
+L'interface se déclare comme application : fenêtre propre, icône dans le dock ou
+sur l'écran d'accueil, pas de barre d'adresse. Le navigateur propose
+l'installation dès que Maestro est servi en HTTPS — ou en `localhost`, considéré
+comme sûr.
+
+Ce n'est **pas** un client natif, et ce n'en tient pas lieu : c'est la réponse
+proportionnée au besoin qu'un client natif couvrirait, pour un poste de
+commandement qui reste une interface web. Deux limites dites franchement : le
+service worker ne met **rien** en cache — un tableau de bord temps réel servi
+depuis un cache montrerait des runs terminés comme actifs — donc aucun mode hors
+ligne ; et iOS veut ses propres icônes PNG, que le dépôt ne fournit pas, si bien
+que l'icône d'écran d'accueil y retombera sur une capture de la page.
+
+### Pilotage de navigateur
+
+Maestro ne pilote pas de navigateur, et n'en pilotera pas : c'est exactement ce
+que le protocole MCP permet de déléguer. Déclare le serveur MCP de ton choix dans
+**MCP → Déclarer un serveur**, en `stdio`, puis coche-le sur les agents
+concernés — ils y gagnent les outils de navigation sans que Maestro ait à en
+embarquer un.
+
+```jsonc
+// Forme d'une déclaration stdio, quel que soit le serveur retenu
+{ "transport": "stdio", "command": "npx", "args": ["-y", "<le-serveur-mcp>"] }
+```
+
+Réinventer cette couche dans Maestro reviendrait à maintenir un pilote de
+navigateur de plus, moins bon que ceux qui existent, et à le coupler à un
+orchestrateur qui n'en a pas besoin.
+
+## Exploitation
+
+Un orchestrateur doit tourner en continu, survivre à une fermeture de terminal et
+repartir après un redémarrage. Un cron qui ne s'exécute que quand une fenêtre est
+ouverte ne surveille rien.
+
+### Service utilisateur (recommandé sur un poste)
+
+```bash
+npm run service -- install     # installe et démarre
+npm run service -- status      # état rapporté par le système
+npm run service -- print       # affiche l'unité sans rien installer
+npm run service -- uninstall   # arrête et retire ; les données restent
+```
+
+Génère une unité **systemd `--user`** sous Linux, un **LaunchAgent** sous macOS.
+
+**Pourquoi un service utilisateur et non système** : Maestro réutilise
+l'authentification Claude de la machine, qui vit dans le répertoire personnel
+(`~/.claude`, ou les profils de comptes sous `<dataDir>/accounts`). Une unité
+tournant sous `root` ou sous un compte de service démarrerait, puis échouerait
+sur « Not logged in » à chaque run.
+
+Contrepartie assumée : un service utilisateur s'arrête à la déconnexion.
+L'installateur active donc la persistance de session (`loginctl enable-linger`),
+et la désinstallation ne la retire pas — d'autres services peuvent en dépendre.
+
+Ce que l'unité impose, et pourquoi :
+
+| Réglage                       | Raison                                                                                                                |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `MAESTRO_HOST=127.0.0.1`      | 🔒 un service qui démarre au boot n'a que son jeton pour barrière : publie par un reverse proxy                       |
+| `Restart=on-failure`          | un arrêt demandé sort en code 0 et ne doit pas être relancé, sinon le service devient inarrêtable                     |
+| `TimeoutStopSec=30`           | Maestro traite SIGTERM : il clôt ses sessions et ferme la base avant de sortir                                        |
+| `--env-file-if-exists`        | le dotenv est chargé par Node — **aucun secret n'entre dans le fichier d'unité**, lisible par les autres utilisateurs |
+| `After=network-online.target` | Maestro joint des API dès son démarrage ; repartir trop tôt produit une minute d'échecs inutiles                      |
+
+### Conteneur
+
+```bash
+docker compose up -d --build
+```
+
+**À savoir avant de construire** : un conteneur **n'hérite pas d'un abonnement
+Claude**. L'authentification réaliste y est une **clé d'API**
+(`ANTHROPIC_API_KEY`). Se dégradent aussi : le radar de sessions ne voit que le
+conteneur, le bac à sable d'agent exige des capacités absentes, et tmux ne
+s'attache que depuis l'intérieur.
+
+Autrement dit : l'image sert un déploiement serveur piloté par clé d'API ; pour
+un poste de travail avec abonnement, le service utilisateur est le bon outil.
+
+Le `compose.yml` publie volontairement sur `127.0.0.1:4520` — l'exposition se
+décide par le reverse proxy, pas par défaut. 🔒 En production, remplace `build`
+par une image versionnée du registre interne, jamais `latest`.
 
 ## Configuration
 

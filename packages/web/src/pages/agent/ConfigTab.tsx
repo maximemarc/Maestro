@@ -27,6 +27,7 @@ export function ConfigTab({ agent }: { agent: AgentConfig }) {
   const agents = useStore((s) => s.agents);
   const mcpServers = useStore((s) => s.mcpServers);
   const ragCollections = useStore((s) => s.ragCollections);
+  const policies = useStore((s) => s.policies);
   // Un descendant ne peut pas devenir le parent de son ancêtre : cela créerait
   // un cycle que le graphe devrait ensuite rattraper.
   const eligibleParents = useMemo(() => {
@@ -99,6 +100,7 @@ export function ConfigTab({ agent }: { agent: AgentConfig }) {
         pluginIds: form.pluginIds,
         mcpServerIds: form.mcpServerIds,
         ragCollectionIds: form.ragCollectionIds,
+        resiliencePolicyId: form.resiliencePolicyId === '' ? null : form.resiliencePolicyId,
         allowedTools: parseToolList(form.allowedTools),
         disallowedTools: parseToolList(form.disallowedTools),
       });
@@ -229,6 +231,24 @@ export function ConfigTab({ agent }: { agent: AgentConfig }) {
               ))}
             </div>
           )}
+        </Field>
+
+        <Field
+          label="Politique de résilience"
+          hint="Ordre des comptes à essayer quand un run échoue ou atteint une limite d'usage. Par défaut, celle de l'instance ; sans politique du tout, le run s'exécute sur l'environnement du serveur, sans repli."
+        >
+          <select
+            className="input"
+            value={form.resiliencePolicyId}
+            onChange={(e) => set('resiliencePolicyId', e.target.value)}
+          >
+            <option value="">Politique par défaut de l’instance</option>
+            {policies.map((policy) => (
+              <option key={policy.id} value={policy.id}>
+                {policy.name}
+              </option>
+            ))}
+          </select>
         </Field>
 
         <Field

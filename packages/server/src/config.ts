@@ -5,6 +5,18 @@ import { randomBytes } from 'node:crypto';
 
 export interface MaestroConfig {
   port: number;
+  /**
+   * Interface d'écoute.
+   *
+   * `0.0.0.0` par défaut — c'est ce que Maestro a toujours fait, et le changer
+   * couperait l'accès de qui l'atteint depuis son réseau local. Mais un service
+   * qui démarre au boot et écoute sur toutes les interfaces expose son API à
+   * tout le réseau, protégée par un seul jeton : l'unité systemd installée par
+   * `npm run service` impose donc `127.0.0.1`, à charge d'un reverse proxy de
+   * publier ce qui doit l'être. Le défaut prudent va aux nouvelles
+   * installations, sans casser les existantes.
+   */
+  host: string;
   dataDir: string;
   dbPath: string;
   workspacesDir: string;
@@ -85,6 +97,7 @@ export function loadConfig(): MaestroConfig {
 
   return {
     port,
+    host: process.env.MAESTRO_HOST?.trim() || '0.0.0.0',
     dataDir,
     dbPath: join(dataDir, 'maestro.db'),
     workspacesDir,

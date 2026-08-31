@@ -38,6 +38,8 @@ export interface ConfigForm {
   pluginIds: string[];
   mcpServerIds: string[];
   ragCollectionIds: string[];
+  /** Chaîne vide = politique par défaut de l'instance. */
+  resiliencePolicyId: string;
   allowedTools: string;
   disallowedTools: string;
 }
@@ -61,6 +63,7 @@ export function toForm(agent: AgentConfig): ConfigForm {
     pluginIds: agent.pluginIds ?? [],
     mcpServerIds: agent.mcpServerIds ?? [],
     ragCollectionIds: agent.ragCollectionIds ?? [],
+    resiliencePolicyId: agent.resiliencePolicyId ?? '',
     allowedTools: agent.allowedTools?.join('\n') ?? '',
     disallowedTools: agent.disallowedTools?.join('\n') ?? '',
   };

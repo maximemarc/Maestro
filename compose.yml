@@ -1,0 +1,54 @@
+# Déploiement Maestro par conteneur.
+#
+# Lancement :
+#   docker compose up -d --build
+#
+# 🔒 La publication est volontairement bornée à la boucle locale de l'hôte.
+# Exposer l'API sur toutes les interfaces la laisserait accessible à tout le
+# réseau derrière un unique jeton ; ce qui doit être publié passe par un reverse
+# proxy, avec TLS et son propre contrôle d'accès.
+services:
+  maestro:
+    build: .
+    # 🔒 En production, remplace `build` par une image versionnée du registre
+    # interne — jamais `latest` : `registry.cneidf.net/maestro:0.1.0`.
+    image: maestro:0.1.0
+    restart: unless-stopped
+    # Node est PID 1 pour recevoir SIGTERM directement, mais ne récolte pas les
+    # zombies. Maestro lance des fils (claude, git, tmux) : sans init, ils
+    # s'accumuleraient sur une instance de longue durée.
+    init: true
+    ports:
+      - '127.0.0.1:4520:4520'
+    # Les secrets viennent d'un fichier hors dépôt, jamais de ce YAML.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Dans le conteneur, écouter sur la boucle locale rendrait le service
+      # injoignable : c'est la publication ci-dessus qui borne l'exposition.
+      MAESTRO_HOST: 0.0.0.0
+      MAESTRO_PORT: '4520'
+      MAESTRO_DATA_DIR: /data
+    volumes:
+      # Base SQLite, workspaces d'agents, skills, jeton : tout l'état vit ici.
+      - maestro-data:/data
+      # Décommente pour confier au conteneur des dépôts de l'hôte sur lesquels
+      # les agents travailleront. En lecture-écriture : un agent qui code écrit.
+      # - /chemin/vers/tes/projets:/projets
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://127.0.0.1:4520/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    # Maestro traite SIGTERM : il clôt ses sessions et ferme la base. Le délai
+    # laisse ce travail aboutir avant l'arrêt forcé.
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+
+volumes:
+  maestro-data:
