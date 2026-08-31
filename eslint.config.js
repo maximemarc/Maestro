@@ -19,7 +19,21 @@ import globals from 'globals';
 
 export default tseslint.config(
   {
-    ignores: ['**/dist/**', '**/node_modules/**', 'packages/web/dist/**'],
+    /*
+     * Les worktrees git vivent sous `.claude/worktrees/` : ce sont des copies
+     * complètes du dépôt, pas des sources de celui-ci.
+     *
+     * Sans cette exclusion, `eslint .` analyse chaque fichier autant de fois
+     * qu'il y a de worktrees ouverts — et il l'analyse mal : les motifs `files`
+     * sont ancrés à la racine, donc le `scripts/` d'un worktree imbriqué ne
+     * reçoit pas les globales Node et remonte en « process is not defined ».
+     * Trois worktrees suffisaient à produire 140 erreurs qui n'existaient nulle
+     * part dans le code, et qui bloquaient tout commit.
+     *
+     * Chaque worktree a sa propre configuration et se linte lui-même : rien
+     * n'est perdu ici.
+     */
+    ignores: ['**/dist/**', '**/node_modules/**', 'packages/web/dist/**', '.claude/worktrees/**'],
   },
 
   js.configs.recommended,
