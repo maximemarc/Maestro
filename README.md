@@ -352,11 +352,32 @@ définir `VOYAGE_API_KEY` ou `OPENAI_API_KEY` dans l'environnement du serveur :
 - Outil MCP `maestro_send_to_agent` : un agent confie une sous-tâche à un autre
   (asynchrone, ou bloquant avec `wait=true`), profondeur limitée (anti-boucle)
 
-### Telegram
+### Canaux — Telegram, webhooks
 
-- Bot bidirectionnel : notifications de fin de run, **approbations par boutons**,
-  `/run <agent> <prompt>`, `/status`, `/agents`, `/approvals`
-- Whitelist stricte de chats (`TELEGRAM_CHAT_IDS`)
+Un **canal** relie Maestro à un endroit où des humains regardent. Un message y
+circule sous forme **structurée** — titre, faits, corps, actions — et chaque
+canal le rend selon ses moyens. C'est ce qui permet d'en ajouter un sans
+recopier la logique : décider qu'un run mérite une notification, lister les
+agents, lancer un run depuis un message n'a jamais rien eu de telegramien.
+
+- **Telegram** — bidirectionnel : notifications de fin de run, **approbations par
+  boutons**, `/run <agent> <prompt>`, `/status`, `/agents`, `/approvals`.
+  Whitelist stricte de chats (`TELEGRAM_CHAT_IDS`).
+- **Webhook sortant** — Slack, Discord, Mattermost, ou tout point d'entrée
+  acceptant du JSON (`MAESTRO_WEBHOOK_URL`). Sans dépendance ni bot à déclarer.
+
+Les deux se complètent plus qu'ils ne se ressemblent, et la différence est
+portée par l'interface : un canal **interactif** rend les actions cliquables, un
+canal sortant seul ne le peut pas — il les mentionne alors en texte, parce
+qu'une approbation qui attend sans qu'on sache où la résoudre est pire qu'une
+notification absente.
+
+> 🔒 **Envoyer vers un service tiers, c'est publier.** Le résultat d'un run peut
+> contenir du code, des extraits de dossier, des noms de clients. Le webhook
+> n'envoie donc par défaut **que l'état** — agent, statut, coût. Y ajouter le
+> résultat demande `MAESTRO_WEBHOOK_DETAIL=full` : un choix explicite, pas un
+> défaut qu'on subit. L'URL d'un webhook est elle-même un secret — elle reste en
+> variable d'environnement et n'apparaît dans aucun journal.
 
 ### Analytique & garde-fous
 

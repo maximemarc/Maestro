@@ -207,8 +207,8 @@ maintenant la lecture recodée et compare sans casse ni diacritiques.
 - ~~**A2** — outils de contrôle, run d'origine `external`, broker d'approbation
   appelé depuis l'outil~~ — **livré**, voir ci-dessous.
 - ~~**B** — moteur `cli` et adaptateurs~~ — **livré**, voir ci-dessous.
-- **Abstraction canal** — extraction d'une interface de `telegram.ts`. Seul lot
-  de l'analyse initiale encore ouvert.
+- ~~**Abstraction canal** — extraction d'une interface de `telegram.ts`~~ —
+  **livré**, voir ci-dessous. Tous les lots de l'analyse initiale sont traités.
 
 ---
 
@@ -306,6 +306,52 @@ La reconnaissance est testée sur les trois styles d'aide répandus (clap,
 commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
 part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
 pour une absence de réponse.
+
+## Abstraction canal — livrée le 31/08/2026
+
+`telegram.ts` mêlait quatre choses, dont une seule était telegramienne : l'API et
+le long-polling. Les trois autres — décider qu'un run mérite une notification,
+mettre en forme le message, exécuter `/agents`, `/status`, `/run` — sont de la
+logique d'orchestrateur. Un second canal les aurait recopiées.
+
+**La décision qui structure tout : un message n'est pas du texte.** Le code
+d'origine fabriquait directement du HTML Telegram, chaîne inutilisable ailleurs —
+`<b>` s'affiche littéralement dans Discord, et les boutons n'ont d'équivalent
+nulle part. Un message est désormais une **structure** (titre, ton, faits, corps,
+actions) que chaque canal rend selon ses moyens.
+
+| Fichier                | Rôle                                                   |
+| ---------------------- | ------------------------------------------------------ |
+| `channels/types.ts`    | contrat `Channel`, message structuré, rendu texte brut |
+| `channels/messages.ts` | quoi notifier, commandes — sans transport              |
+| `channels/registry.ts` | un seul abonnement au bus, diffusion isolée par canal  |
+| `channels/telegram.ts` | transport et rendu HTML, rien d'autre                  |
+| `channels/webhook.ts`  | Slack / Discord / brut, sortant                        |
+
+**Un second canal, pour que l'interface soit éprouvée et non supposée.** Une
+abstraction à une seule implémentation ne prouve rien. Le webhook sortant
+confronte le contrat à un transport qui ne ressemble en rien à Telegram : pas de
+réception, pas de boutons, une charge utile différente par service. C'est ce qui
+a fait apparaître la distinction `interactive` — un canal sortant ne peut pas
+résoudre une approbation, il doit dire où aller.
+
+**Deux choix de sécurité, tenus dans le code :**
+
+- 🔒 Le webhook n'envoie **que l'état** par défaut — agent, statut, coût. Le
+  résultat d'un run peut porter du code ou des noms de clients, et l'expédier
+  vers un service tiers est une publication. `MAESTRO_WEBHOOK_DETAIL=full` est
+  un choix explicite de l'opérateur.
+- 🔒 L'URL d'un webhook vaut un mot de passe : elle reste en variable
+  d'environnement, et n'est jamais écrite dans les journaux — qui sont lisibles
+  depuis l'interface.
+
+**Ce qui n'a pas bougé, volontairement** : l'origine d'un run lancé depuis un
+canal reste `telegram`. La renommer imposerait une migration des runs déjà
+enregistrés pour la seule satisfaction du vocabulaire.
+
+**Reste ouvert** : un canal **entrant** autre que Telegram. Chaque service a sa
+propre enveloppe et sa propre vérification de signature — c'est un lot par
+service, pas une généralisation. Le contrat est prêt à les recevoir.
 
 ## A2 — outils de contrôle pour les clients tiers, livré le 31/08/2026
 

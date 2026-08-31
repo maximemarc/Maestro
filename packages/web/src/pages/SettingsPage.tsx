@@ -237,7 +237,10 @@ export default function SettingsPage() {
                     setSettings({ ...settings, telegramNotifyAllRuns: e.target.checked })
                   }
                 />
-                Notifier chaque fin de run sur Telegram
+                {/* Le réglage porte sur tous les canaux configurés, pas seulement
+                    Telegram ; la clé garde son nom pour ne pas casser les
+                    instances déjà enregistrées. */}
+                Notifier chaque fin de run sur les canaux configurés
               </label>
 
               <label className="checkbox-row mb-2">

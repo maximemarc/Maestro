@@ -32,7 +32,9 @@ import { registerRoutes } from './routes.ts';
 import { RunEngine } from './runs.ts';
 import { Scheduler } from './scheduler.ts';
 import { SkillRegistry } from './skills.ts';
-import { TelegramBot } from './telegram.ts';
+import { ChannelRegistry } from './channels/registry.ts';
+import { TelegramChannel } from './channels/telegram.ts';
+import { WebhookChannel, webhookConfigFromEnv } from './channels/webhook.ts';
 import { TmuxBridge } from './tmux.ts';
 import { nowIso } from './util.ts';
 
@@ -85,13 +87,18 @@ const engine = new RunEngine(
 const externalSessions = new ExternalSessionService(store, bus);
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
-const telegram = new TelegramBot(config, store, bus, engine, agents, approvals);
+const telegram = new TelegramChannel(config, store, bus, engine, agents, approvals);
+const channels = new ChannelRegistry(
+  [telegram, new WebhookChannel(webhookConfigFromEnv(), bus)],
+  bus,
+  { store, agents, engine },
+);
 const connectors = new ConnectorRegistry();
 const radar = new SessionRadar(config, store, bus, agents);
 
 skills.syncAllWorkspaces();
 scheduler.init();
-telegram.start();
+channels.start();
 externalSessions.start();
 
 // ---------------------------------------------------------------------------
@@ -264,7 +271,7 @@ const shutdown = async (): Promise<void> => {
   metrics.stop();
   radar.stop();
   scheduler.shutdown();
-  telegram.stop();
+  channels.stop();
   engine.shutdown();
   await app.close();
   store.close();
@@ -281,8 +288,9 @@ try {
   console.log(`  ➜  Jeton     : ${config.authToken}`);
   console.log(`  ➜  Données   : ${config.dataDir}`);
   console.log(`  ➜  MCP       : http://localhost:${config.port}/mcp (Bearer)`);
+  const active = channels.list();
   console.log(
-    `  ➜  Telegram  : ${telegram.enabled ? 'actif' : 'inactif (TELEGRAM_BOT_TOKEN absent)'}\n`,
+    `  ➜  Canaux    : ${active.length > 0 ? active.map((c) => c.label).join(', ') : 'aucun (TELEGRAM_BOT_TOKEN et MAESTRO_WEBHOOK_URL absents)'}\n`,
   );
 } catch (err) {
   console.error('Démarrage impossible :', err);
