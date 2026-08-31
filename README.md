@@ -337,6 +337,31 @@ définir `VOYAGE_API_KEY` ou `OPENAI_API_KEY` dans l'environnement du serveur :
 - Planification agent + skill + prompt (expressions cron, presets)
 - Run-now, historique, délai max, notification de fin
 
+### Battement de cœur — l'orchestrateur qui délibère
+
+Une routine **déclenche** un prompt écrit d'avance. Un battement dresse un état
+des lieux — runs actifs, approbations en attente, kanban, échecs récents, comptes
+proches de leur limite — le confie à un agent avec ses consignes permanentes
+(`HEARTBEAT.md` dans son workspace), et le laisse **décider s'il y a lieu
+d'agir**, y compris conclure que non. C'est là toute la différence : un cron agit
+toujours.
+
+L'agent agit par ses outils MCP habituels (kanban, délégation, mémoire) : rien de
+spécifique n'est ajouté, donc sa politique d'approbation et ses outils autorisés
+bornent la délibération comme ils bornent le reste.
+
+Les comptes rendus des battements précédents lui sont **réinjectés**. Sans cette
+mémoire, un agent recrée la même carte vingt-quatre fois par jour, faute de
+savoir qu'il l'a déjà créée.
+
+> 🔒 **Un orchestrateur qui délibère dépense des tokens sans qu'on lui ait rien
+> demandé.** C'est un changement de nature, et les garde-fous en sont la
+> condition : désactivé par défaut, agent dédié, plancher de cinq minutes entre
+> deux battements, plafond quotidien, budget de tokens de l'agent comme plafond
+> par battement, rien pendant qu'un run tourne, et le quota cédé au travail
+> demandé par un humain. Un battement qui ne fait rien est un succès, et
+> l'historique le distingue d'un battement qui a agi.
+
 ### Pipelines (chaînes d'agents)
 
 - Étapes séquentielles multi-agents ; variables de gabarit `{{input}}`, `{{prev}}`,

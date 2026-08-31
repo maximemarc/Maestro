@@ -47,6 +47,9 @@ import type {
   TokensByBucket,
   UpsertSkillRequest,
   AccountUsage,
+  Beat,
+  HeartbeatConfig,
+  SituationReport,
   OnboardingState,
   OnboardingStep,
   ProviderAccount,
@@ -392,6 +395,17 @@ export const api = {
   listHandoffs: (agentId?: string) =>
     request<SessionHandoff[]>('GET', `/api/handoffs${agentId ? `?agentId=${agentId}` : ''}`),
   getHandoff: (id: string) => request<SessionHandoff>('GET', `/api/handoffs/${id}`),
+
+  // Battement de cœur
+  getHeartbeat: () =>
+    request<{ config: HeartbeatConfig; nextBeatAt: string | null; beats: Beat[] }>(
+      'GET',
+      '/api/heartbeat',
+    ),
+  patchHeartbeat: (patch: Partial<HeartbeatConfig>) =>
+    request<HeartbeatConfig>('PATCH', '/api/heartbeat', patch),
+  heartbeatSituation: () => request<SituationReport>('GET', '/api/heartbeat/situation'),
+  beatNow: () => request<Beat>('POST', '/api/heartbeat/beat'),
 
   // Assistant de configuration
   getOnboarding: () =>

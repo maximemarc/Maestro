@@ -25,6 +25,7 @@ import type {
   TmuxSessionInfo,
 } from './types.ts';
 import type { ProviderAccount, ResiliencePolicy, RunAttempt, SessionHandoff } from './providers.ts';
+import type { Beat } from './heartbeat.ts';
 
 // ---------------------------------------------------------------------------
 // WebSocket : événements serveur → client
@@ -64,6 +65,9 @@ export type ServerEvent =
      historique. */
   | { type: 'run.attempt'; payload: RunAttempt }
   | { type: 'handoff.created'; payload: SessionHandoff }
+  /* Poussé aussi pour un battement **sauté** : c'est le cas le plus fréquent, et
+     celui qui explique pourquoi l'orchestrateur ne fait rien. */
+  | { type: 'heartbeat.beat'; payload: Beat }
   | { type: 'log'; payload: LogLine };
 
 export type ServerEventType = ServerEvent['type'];

@@ -124,7 +124,22 @@ export interface AgentTemplate {
  * et écrirait en mémoire dans l'angle mort de Mission Control.
  */
 export type RunOrigin =
-  'manual' | 'routine' | 'kanban' | 'telegram' | 'pipeline' | 'agent' | 'external';
+  | 'manual'
+  | 'routine'
+  | 'kanban'
+  | 'telegram'
+  | 'pipeline'
+  | 'agent'
+  | 'external'
+  /**
+   * Délibération déclenchée par le battement de cœur.
+   *
+   * Distinguée de `routine` à dessein : une routine exécute un prompt écrit
+   * d'avance, un battement laisse l'agent **décider** s'il y a lieu d'agir. Les
+   * confondre rendrait impossible de mesurer ce que l'autonomie coûte, et de la
+   * couper sans couper les routines.
+   */
+  | 'heartbeat';
 
 export type RunStatus =
   'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled' | 'timeout';

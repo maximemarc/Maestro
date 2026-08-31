@@ -20,6 +20,7 @@ import { TaskService } from './kanban.ts';
 import { Metrics } from './metrics.ts';
 import { ApprovalBroker } from './permissions.ts';
 import { PipelineService } from './pipelines.ts';
+import { HeartbeatService } from './heartbeat.ts';
 import { ExternalSessionService } from './mcp-external.ts';
 import { registerMcpGateway } from './mcp-http.ts';
 import { McpRegistry } from './mcp-registry.ts';
@@ -85,6 +86,7 @@ const engine = new RunEngine(
   handoffs,
 );
 const externalSessions = new ExternalSessionService(store, bus);
+const heartbeat = new HeartbeatService({ store, bus, agents, engine, providers });
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
 const telegram = new TelegramChannel(config, store, bus, engine, agents, approvals);
@@ -100,6 +102,7 @@ skills.syncAllWorkspaces();
 scheduler.init();
 channels.start();
 externalSessions.start();
+heartbeat.start();
 
 // ---------------------------------------------------------------------------
 // HTTP + WebSocket
@@ -219,6 +222,7 @@ registerRoutes(app, {
   tmux,
   providers,
   handoffs,
+  heartbeat,
   telegramEnabled: telegram.enabled,
   startedAt,
 });

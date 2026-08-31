@@ -101,7 +101,7 @@ mémoire fichier, approbations. Le tableau ne compare que cette zone commune.
 | 1   | **Multi-fournisseurs**                         | Anthropic, OpenAI, Google, Ollama, LM Studio ; routage dynamique + chaîne de fallback | verrouillé Anthropic via Claude Code                                            | **fort**                         |
 | 2   | **Canaux**                                     | 29 (WhatsApp, Discord, Slack, Signal, iMessage, e-mail…)                              | Telegram seul, dans un `telegram.ts` monolithique — pas d'abstraction « canal » | **fort**                         |
 | 3   | **Isolation / sandbox**                        | sandboxing optionnel, containers d'exécution                                          | aucune : un agent `bypassPermissions` a la machine                              | **fort**                         |
-| 4   | **Autonomie proactive**                        | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | cron : déclenchement déterministe, aucune délibération                          | moyen                            |
+| 4   | ~~**Autonomie proactive**~~ **comblé**         | heartbeat : le daemon lit `HEARTBEAT.md` et **décide** quoi faire                     | battement de cœur : état des lieux + `HEARTBEAT.md`, l'agent décide             | moyen                            |
 | 5   | ~~**Installation / exploitation**~~ **comblé** | `curl \| bash`, `onboard --install-daemon`, systemd/LaunchAgent, Docker               | `npm run service -- install` (systemd user / LaunchAgent), Dockerfile + compose | moyen, **peu coûteux à combler** |
 | 6   | **Fédération inter-machines**                  | plugin A2A : découverte DNS-SD, circuit breaker                                       | `send_to_agent` intra-instance uniquement                                       | moyen                            |
 | 7   | **Clients natifs**                             | app macOS, iOS/Android, Canvas                                                        | web responsive derrière reverse proxy                                           | faible                           |
@@ -306,6 +306,67 @@ La reconnaissance est testée sur les trois styles d'aide répandus (clap,
 commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
 part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
 pour une absence de réponse.
+
+## Partie 2, manque n°4 — autonomie proactive, livré le 31/08/2026
+
+Une routine cron **déclenche** un prompt écrit d'avance. Un battement de cœur
+dresse un **état des lieux**, le confie à un agent avec ses consignes permanentes
+(`HEARTBEAT.md` dans son workspace), et le laisse **décider** s'il y a lieu
+d'agir — y compris conclure que non. Toute la différence tient dans ce dernier
+point : un cron agit toujours.
+
+### Aucune nouvelle surface d'action
+
+Un battement **est un run**. L'agent agit par les outils MCP qu'il a déjà :
+kanban, délégation, mémoire. C'est délibéré — sa politique d'approbation et ses
+outils autorisés bornent la délibération exactement comme ils bornent le reste.
+Un canal d'action réservé au battement échapperait à ces garde-fous.
+
+### Le mode d'échec principal, et sa parade
+
+Sans mémoire de ses propres décisions, un agent qui délibère toutes les heures
+recrée la même carte kanban vingt-quatre fois par jour : il n'a aucun moyen de
+savoir qu'il l'a déjà créée. Les comptes rendus des battements précédents sont
+donc réinjectés dans l'état des lieux. C'est la pièce sans laquelle la
+fonctionnalité serait activement nuisible — et elle est vérifiée en réel.
+
+### 🔒 Les garde-fous ne sont pas des options
+
+Un orchestrateur qui délibère dépense des tokens sans que personne n'ait rien
+demandé. C'est un changement de nature, pas une commodité de plus.
+
+| Garde-fou                         | Raison                                                                                              |
+| --------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **désactivé par défaut**          | l'autonomie se demande, elle ne s'hérite pas                                                        |
+| **agent dédié**                   | ses permissions bornent ce que la délibération peut faire                                           |
+| **plancher de 5 minutes**         | délibérer plus souvent coûterait plus que ça ne rapporte                                            |
+| **plafond quotidien**             | garde-fou de facture, indépendant du rythme                                                         |
+| **budget de tokens de l'agent**   | un battement _est_ un run : inutile d'inventer un second compteur                                   |
+| **rien pendant qu'un run tourne** | une délibération lancée sur du travail en cours juge un état déjà périmé                            |
+| **céder le quota**                | consommer la fin d'une fenêtre pour un battement plutôt que pour un humain serait le pire arbitrage |
+| **pas d'empilement**              | deux délibérations concurrentes décideraient deux fois la même action                               |
+
+L'ordre d'évaluation compte et est testé : la configuration avant l'état du
+système, pour qu'un battement désactivé ne fasse ni mesurer un quota ni
+interroger la base.
+
+### Une issue qui distingue « a agi » de « rien à faire »
+
+Un battement qui conclut à l'inaction est un **succès**, et l'historique doit le
+dire — sinon impossible de juger si la délibération sert à quelque chose.
+L'issue est donc reclassée après coup, à partir du compte rendu de l'agent. La
+reconnaissance est une heuristique étroite et faillible, qui ne sert qu'à
+l'affichage et à la mémoire : en cas de doute, le battement est compté comme
+ayant agi, parce que surestimer l'activité est moins trompeur que de la masquer.
+
+### Vérifié en conditions réelles
+
+Instance jetable, agent « Veilleur » sur haiku avec budget de tokens :
+désactivé au départ ; rythme `* * * * *` refusé en 400 avec son motif ;
+battement sans agent sauté avec sa raison ; après activation, état des lieux
+assemblé correctement ; battement réel → l'agent conclut « Aucune action
+requise », et l'issue **se reclasse de `acted` en `idle`** ; son compte rendu
+réapparaît bien dans l'état des lieux suivant.
 
 ## Partie 2, manque n°5 — exploitation, livré le 31/08/2026
 

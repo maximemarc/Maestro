@@ -5,6 +5,7 @@ import { fmtDateTime } from '../lib/format';
 import { useStore } from '../lib/store';
 import { Clock, Play, Plus } from '@phosphor-icons/react';
 import { AgentChip, ConfirmButton, EmptyState, ErrorText, Field, Modal } from '../components/ui';
+import { HeartbeatCard } from '../components/HeartbeatCard';
 
 const CRON_PRESETS: { label: string; expr: string }[] = [
   { label: 'Toutes les heures', expr: '0 * * * *' },
@@ -165,6 +166,8 @@ export default function RoutinesPage() {
         </button>
       </div>
       <p className="page-lede">Un agent, une skill et un prompt, déclenchés à l'heure dite.</p>
+
+      <HeartbeatCard />
 
       {pageError && <ErrorText>{pageError}</ErrorText>}
 

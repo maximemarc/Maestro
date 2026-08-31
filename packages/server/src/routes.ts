@@ -23,6 +23,7 @@ import { McpError, type McpRegistry } from './mcp-registry.ts';
 import { PluginError, type PluginService } from './plugins.ts';
 import { embeddingStatus } from './rag-embeddings.ts';
 import { RagError, type RagService } from './rag.ts';
+import type { HeartbeatService } from './heartbeat.ts';
 import type { HandoffService } from './providers/handoff.ts';
 import type { ProviderService } from './providers/registry.ts';
 import { registerProviderRoutes } from './routes-providers.ts';
@@ -57,6 +58,7 @@ export interface Services {
   tmux: TmuxBridge;
   providers: ProviderService;
   handoffs: HandoffService;
+  heartbeat: HeartbeatService;
   telegramEnabled: boolean;
   startedAt: string;
 }
@@ -295,6 +297,17 @@ const settingsSchema = z.object({
   maxConcurrentRuns: z.number().int().min(1).max(32).optional(),
   maxAgentDepth: z.number().int().min(0).max(5).optional(),
   defaultResiliencePolicyId: z.string().max(60).nullable().optional(),
+});
+
+const heartbeatSchema = z.object({
+  enabled: z.boolean().optional(),
+  agentId: z.string().max(60).nullable().optional(),
+  cronExpr: z.string().min(5).max(120).optional(),
+  /* Plafond borné haut : au-delà d'un battement par minute sur la journée, ce
+     n'est plus un plafond. */
+  dailyMax: z.number().int().min(1).max(1440).optional(),
+  skipWhenBusy: z.boolean().optional(),
+  skipUnderQuotaPressure: z.boolean().optional(),
 });
 
 /**
@@ -1193,6 +1206,28 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
     const patch = parseOr400(settingsSchema, req.body);
     return s.store.patchSettings(patch);
   });
+
+  // -- Battement de cœur -----------------------------------------------------
+
+  app.get('/api/heartbeat', async () => ({
+    config: s.heartbeat.config(),
+    nextBeatAt: s.heartbeat.nextBeatAt(),
+    beats: s.heartbeat.beats(20),
+  }));
+
+  app.patch('/api/heartbeat', async (req) => {
+    const patch = parseOr400(heartbeatSchema, req.body);
+    /* Expression invalide et rythme trop rapproché remontent tous deux en 400
+       avec leur motif : ce sont des règles
+       métier, pas une panne, et l'opérateur doit savoir pourquoi son rythme est
+       refusé. */
+    return badRequestOn(() => s.heartbeat.update(patch));
+  });
+
+  /** État des lieux tel que l'agent le verra — pour juger avant d'activer. */
+  app.get('/api/heartbeat/situation', async () => s.heartbeat.situation());
+
+  app.post('/api/heartbeat/beat', async () => s.heartbeat.beat(true));
 
   registerProviderRoutes(app, {
     store: s.store,

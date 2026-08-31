@@ -28,6 +28,8 @@ import type {
   Settings,
   AgentStats,
   TokensByBucket,
+  Beat,
+  HeartbeatConfig,
   OnboardingState,
   ProviderAccount,
   ProviderKind,
@@ -36,6 +38,7 @@ import type {
   RunAttempt,
   SessionHandoff,
 } from '@maestro/shared';
+import { HEARTBEAT_DEFAULTS } from '@maestro/shared';
 import { makeId, nowIso, safeJsonParse } from './util.ts';
 
 const SCHEMA = `
@@ -367,6 +370,23 @@ CREATE TABLE IF NOT EXISTS session_handoffs (
 CREATE INDEX IF NOT EXISTS idx_handoffs_run ON session_handoffs(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_handoffs_agent ON session_handoffs(agent_id, created_at);
 
+/*
+ * Historique des battements de cœur.
+ *
+ * Table à part des runs : un battement sauté par un garde-fou n'a pas de run —
+ * c'est même le cas le plus fréquent, et le plus utile à voir. Le forcer dans
+ * la table runs obligerait à créer des runs fantômes, ou à perdre la trace des sauts.
+ */
+CREATE TABLE IF NOT EXISTS heartbeat_beats (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  reason TEXT,
+  run_id TEXT,
+  summary TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_beats_at ON heartbeat_beats(at DESC);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -390,6 +410,9 @@ const DEFAULT_SETTINGS: Settings = {
  * l'exposerait à être réinitialisé par un formulaire qui n'en sait rien.
  */
 const ONBOARDING_KEY = 'onboarding';
+
+/** Configuration du battement de cœur, rangée à côté de l'onboarding. */
+const HEARTBEAT_KEY = 'heartbeat';
 
 const DEFAULT_ONBOARDING: OnboardingState = {
   completed: false,
@@ -450,6 +473,17 @@ function rowToAgent(r: SqlRow): AgentConfig {
     archived: bool(r.archived),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
+  };
+}
+
+function rowToBeat(r: SqlRow): Beat {
+  return {
+    id: num(r.id),
+    at: str(r.at),
+    outcome: str(r.outcome) as Beat['outcome'],
+    reason: strOrNull(r.reason),
+    runId: strOrNull(r.run_id),
+    summary: strOrNull(r.summary),
   };
 }
 
@@ -1631,6 +1665,60 @@ export class Store {
       )
       .run(ONBOARDING_KEY, JSON.stringify(next));
     return next;
+  }
+
+  // -- Battement de cœur -----------------------------------------------------
+
+  getHeartbeatConfig(): HeartbeatConfig {
+    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(HEARTBEAT_KEY) as
+      SqlRow | undefined;
+    if (!row) return { ...HEARTBEAT_DEFAULTS };
+    return {
+      ...HEARTBEAT_DEFAULTS,
+      ...safeJsonParse<Partial<HeartbeatConfig>>(str(row.value), {}),
+    };
+  }
+
+  patchHeartbeatConfig(patch: Partial<HeartbeatConfig>): HeartbeatConfig {
+    const next: HeartbeatConfig = { ...this.getHeartbeatConfig(), ...patch, updatedAt: nowIso() };
+    this.db
+      .prepare(
+        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      )
+      .run(HEARTBEAT_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  insertBeat(beat: Omit<Beat, 'id'>): Beat {
+    const result = this.db
+      .prepare(
+        'INSERT INTO heartbeat_beats (at, outcome, reason, run_id, summary) VALUES (?, ?, ?, ?, ?)',
+      )
+      .run(beat.at, beat.outcome, beat.reason, beat.runId, beat.summary);
+    return { ...beat, id: Number(result.lastInsertRowid) };
+  }
+
+  /** Renseigne le compte rendu d'un battement, une fois son run terminé. */
+  completeBeat(id: number, outcome: Beat['outcome'], summary: string | null): void {
+    this.db
+      .prepare('UPDATE heartbeat_beats SET outcome = ?, summary = ? WHERE id = ?')
+      .run(outcome, summary, id);
+  }
+
+  listBeats(limit = 20): Beat[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM heartbeat_beats ORDER BY at DESC LIMIT ?')
+        .all(limit) as SqlRow[]
+    ).map(rowToBeat);
+  }
+
+  /** Battements du jour, pour appliquer le plafond quotidien. */
+  countBeatsSince(sinceIso: string): number {
+    const row = this.db
+      .prepare('SELECT COUNT(*) AS n FROM heartbeat_beats WHERE at >= ?')
+      .get(sinceIso) as SqlRow | undefined;
+    return row ? num(row.n) : 0;
   }
 
   // -- Comptes de fournisseurs -----------------------------------------------
