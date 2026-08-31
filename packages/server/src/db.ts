@@ -28,6 +28,13 @@ import type {
   Settings,
   AgentStats,
   TokensByBucket,
+  OnboardingState,
+  ProviderAccount,
+  ProviderKind,
+  ResiliencePolicy,
+  ResilienceTarget,
+  RunAttempt,
+  SessionHandoff,
 } from '@maestro/shared';
 import { makeId, nowIso, safeJsonParse } from './util.ts';
 
@@ -270,6 +277,95 @@ CREATE VIRTUAL TABLE IF NOT EXISTS rag_fts USING fts5(
   tokenize='unicode61 remove_diacritics 2'
 );
 
+CREATE TABLE IF NOT EXISTS provider_accounts (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  auth_mode TEXT NOT NULL DEFAULT 'inherit',
+  config_dir TEXT,
+  api_key_env TEXT,
+  base_url TEXT,
+  api_flavor TEXT,
+  model TEXT,
+  command TEXT,
+  args TEXT,
+  env TEXT NOT NULL DEFAULT '{}',
+  priority INTEGER NOT NULL DEFAULT 100,
+  daily_cost_limit_usd REAL,
+  health TEXT NOT NULL DEFAULT 'unknown',
+  cooldown_until TEXT,
+  last_error TEXT,
+  last_checked_at TEXT,
+  detail TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS resilience_policies (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  targets TEXT NOT NULL DEFAULT '[]',
+  max_attempts_per_target INTEGER NOT NULL DEFAULT 2,
+  max_total_attempts INTEGER NOT NULL DEFAULT 4,
+  backoff_initial_ms INTEGER NOT NULL DEFAULT 2000,
+  backoff_factor REAL NOT NULL DEFAULT 3,
+  backoff_max_ms INTEGER NOT NULL DEFAULT 60000,
+  backoff_jitter INTEGER NOT NULL DEFAULT 1,
+  quota_wait_max_sec INTEGER NOT NULL DEFAULT 900,
+  switch_on_error INTEGER NOT NULL DEFAULT 1,
+  handoff_threshold_pct INTEGER NOT NULL DEFAULT 80,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+/*
+ * Tentatives d'un run.
+ *
+ * Table à part plutôt que colonnes de la table runs : un run réussi du premier
+ * coup n’a rien à porter, et un run qui a basculé trois fois ne tient pas dans
+ * une ligne. C’est aussi la seule trace qui explique pourquoi un run a fini
+ * ailleurs que là où il avait commencé.
+ */
+CREATE TABLE IF NOT EXISTS run_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  account_id TEXT,
+  account_name TEXT NOT NULL,
+  provider_kind TEXT NOT NULL,
+  model TEXT NOT NULL,
+  status TEXT NOT NULL,
+  failure_class TEXT,
+  error TEXT,
+  waited_ms INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_run_attempts_run ON run_attempts(run_id, idx);
+
+CREATE TABLE IF NOT EXISTS session_handoffs (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  degraded INTEGER NOT NULL DEFAULT 0,
+  source_kind TEXT NOT NULL,
+  source_account_id TEXT,
+  source_session_id TEXT,
+  tokens_at_capture INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoffs_run ON session_handoffs(run_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_handoffs_agent ON session_handoffs(agent_id, created_at);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -282,6 +378,23 @@ const DEFAULT_SETTINGS: Settings = {
   approvalTimeoutSec: 900,
   maxConcurrentRuns: 4,
   maxAgentDepth: 2,
+  defaultResiliencePolicyId: null,
+};
+
+/**
+ * État de l'assistant de configuration.
+ *
+ * Rangé dans la table `settings` sous une clé dédiée plutôt que dans `Settings` :
+ * c'est un état de parcours, pas un réglage. Le mélanger aux réglages
+ * l'exposerait à être réinitialisé par un formulaire qui n'en sait rien.
+ */
+const ONBOARDING_KEY = 'onboarding';
+
+const DEFAULT_ONBOARDING: OnboardingState = {
+  completed: false,
+  step: 'welcome',
+  completedAt: null,
+  skipped: [],
 };
 
 // -- helpers de (dé)sérialisation ------------------------------------------
@@ -321,6 +434,7 @@ function rowToAgent(r: SqlRow): AgentConfig {
     pluginIds: safeJsonParse<string[]>(str(r.plugin_ids ?? '[]'), []),
     mcpServerIds: safeJsonParse<string[]>(str(r.mcp_server_ids ?? '[]'), []),
     ragCollectionIds: safeJsonParse<string[]>(str(r.rag_collection_ids ?? '[]'), []),
+    resiliencePolicyId: strOrNull(r.resilience_policy_id ?? null),
     workspaceDir: str(r.workspace_dir),
     memoryEnabled: bool(r.memory_enabled),
     allowedTools:
@@ -335,6 +449,92 @@ function rowToAgent(r: SqlRow): AgentConfig {
     archived: bool(r.archived),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
+  };
+}
+
+function rowToProviderAccount(r: SqlRow): ProviderAccount {
+  return {
+    id: str(r.id),
+    name: str(r.name),
+    kind: str(r.kind) as ProviderAccount['kind'],
+    enabled: bool(r.enabled),
+    authMode: str(r.auth_mode) as ProviderAccount['authMode'],
+    configDir: strOrNull(r.config_dir),
+    apiKeyEnv: strOrNull(r.api_key_env),
+    baseUrl: strOrNull(r.base_url),
+    apiFlavor: strOrNull(r.api_flavor) as ProviderAccount['apiFlavor'],
+    model: strOrNull(r.model),
+    command: strOrNull(r.command),
+    args: r.args === null ? null : safeJsonParse<string[]>(str(r.args), []),
+    env: safeJsonParse<Record<string, string>>(str(r.env ?? '{}'), {}),
+    priority: num(r.priority),
+    dailyCostLimitUsd: numOrNull(r.daily_cost_limit_usd),
+    health: str(r.health) as ProviderAccount['health'],
+    cooldownUntil: strOrNull(r.cooldown_until),
+    lastError: strOrNull(r.last_error),
+    lastCheckedAt: strOrNull(r.last_checked_at),
+    detail: strOrNull(r.detail),
+    createdAt: str(r.created_at),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+function rowToPolicy(r: SqlRow): ResiliencePolicy {
+  return {
+    id: str(r.id),
+    name: str(r.name),
+    description: str(r.description),
+    targets: safeJsonParse<ResilienceTarget[]>(str(r.targets ?? '[]'), []),
+    maxAttemptsPerTarget: num(r.max_attempts_per_target),
+    maxTotalAttempts: num(r.max_total_attempts),
+    backoffInitialMs: num(r.backoff_initial_ms),
+    backoffFactor: num(r.backoff_factor),
+    backoffMaxMs: num(r.backoff_max_ms),
+    backoffJitter: bool(r.backoff_jitter),
+    quotaWaitMaxSec: num(r.quota_wait_max_sec),
+    switchOnError: bool(r.switch_on_error),
+    handoffThresholdPct: num(r.handoff_threshold_pct),
+    createdAt: str(r.created_at),
+    updatedAt: str(r.updated_at),
+  };
+}
+
+function rowToAttempt(r: SqlRow): RunAttempt {
+  return {
+    id: num(r.id),
+    runId: str(r.run_id),
+    index: num(r.idx),
+    accountId: strOrNull(r.account_id),
+    accountName: str(r.account_name),
+    providerKind: str(r.provider_kind) as RunAttempt['providerKind'],
+    model: str(r.model),
+    status: str(r.status) as RunAttempt['status'],
+    failureClass: strOrNull(r.failure_class) as RunAttempt['failureClass'],
+    error: strOrNull(r.error),
+    waitedMs: num(r.waited_ms),
+    inputTokens: num(r.input_tokens),
+    outputTokens: num(r.output_tokens),
+    cacheReadTokens: num(r.cache_read_tokens),
+    cacheWriteTokens: num(r.cache_write_tokens),
+    costUsd: num(r.cost_usd),
+    startedAt: str(r.started_at),
+    endedAt: strOrNull(r.ended_at),
+  };
+}
+
+function rowToHandoff(r: SqlRow): SessionHandoff {
+  return {
+    id: str(r.id),
+    runId: str(r.run_id),
+    agentId: str(r.agent_id),
+    reason: str(r.reason) as SessionHandoff['reason'],
+    summary: str(r.summary),
+    degraded: bool(r.degraded),
+    sourceKind: str(r.source_kind) as SessionHandoff['sourceKind'],
+    sourceAccountId: strOrNull(r.source_account_id),
+    sourceSessionId: strOrNull(r.source_session_id),
+    tokensAtCapture: num(r.tokens_at_capture),
+    createdAt: str(r.created_at),
   };
 }
 
@@ -434,6 +634,10 @@ function rowToRun(r: SqlRow): Run {
     model: str(r.model),
     engine: str(r.engine) as Run['engine'],
     tmuxSession: strOrNull(r.tmux_session),
+    providerKind: (strOrNull(r.provider_kind ?? null) ?? 'claude-sdk') as ProviderKind,
+    accountId: strOrNull(r.account_id ?? null),
+    accountName: strOrNull(r.account_name ?? null),
+    attemptCount: r.attempt_count === undefined ? 1 : num(r.attempt_count),
     numTurns: num(r.num_turns),
     inputTokens: num(r.input_tokens),
     outputTokens: num(r.output_tokens),
@@ -503,7 +707,13 @@ function rowToPipeline(r: SqlRow): Pipeline {
     id: str(r.id),
     name: str(r.name),
     description: str(r.description),
-    steps: safeJsonParse(str(r.steps), []),
+    /* Les étapes enregistrées avant l'arrivée des politiques n'ont pas le
+       champ : le normaliser ici évite un `undefined` qui traverserait l'API
+       jusqu'au formulaire du front. */
+    steps: safeJsonParse<Pipeline['steps']>(str(r.steps), []).map((step) => ({
+      ...step,
+      resiliencePolicyId: step.resiliencePolicyId ?? null,
+    })),
     createdAt: str(r.created_at),
     updatedAt: str(r.updated_at),
   };
@@ -619,6 +829,30 @@ export class Store {
        * les anciens vecteurs en place, incomparables et silencieusement inutiles.
        */
       ['rag_chunks', 'embedding_model', 'ALTER TABLE rag_chunks ADD COLUMN embedding_model TEXT'],
+      /*
+       * Politique de résilience d'un agent : ordre des comptes, retries,
+       * attente de quota. Nullable, et c'est voulu — un agent sans politique
+       * garde exactement le comportement d'avant les fournisseurs multiples.
+       */
+      ['agents', 'resilience_policy_id', 'ALTER TABLE agents ADD COLUMN resilience_policy_id TEXT'],
+      /*
+       * Fournisseur et compte effectifs d'un run.
+       *
+       * Le défaut `claude-sdk` sur les lignes existantes n'est pas une
+       * supposition : avant ce lot, Maestro ne savait exécuter que ça.
+       */
+      [
+        'runs',
+        'provider_kind',
+        "ALTER TABLE runs ADD COLUMN provider_kind TEXT NOT NULL DEFAULT 'claude-sdk'",
+      ],
+      ['runs', 'account_id', 'ALTER TABLE runs ADD COLUMN account_id TEXT'],
+      ['runs', 'account_name', 'ALTER TABLE runs ADD COLUMN account_name TEXT'],
+      [
+        'runs',
+        'attempt_count',
+        'ALTER TABLE runs ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1',
+      ],
     ];
     for (const [table, column, ddl] of added) {
       const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as SqlRow[];
@@ -656,10 +890,10 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO agents (id, name, emoji, description, model, engine, permission_mode,
-          approval_policy, system_prompt, cli_agent, parent_agent_id, plugin_ids, mcp_server_ids, rag_collection_ids, workspace_dir,
+          approval_policy, system_prompt, cli_agent, parent_agent_id, plugin_ids, mcp_server_ids, rag_collection_ids, resilience_policy_id, workspace_dir,
           memory_enabled, allowed_tools, disallowed_tools, max_turns, timeout_sec, token_budget,
           color, pinned, archived, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         agent.id,
@@ -676,6 +910,7 @@ export class Store {
         JSON.stringify(agent.pluginIds ?? []),
         JSON.stringify(agent.mcpServerIds ?? []),
         JSON.stringify(agent.ragCollectionIds ?? []),
+        agent.resiliencePolicyId ?? null,
         agent.workspaceDir,
         agent.memoryEnabled ? 1 : 0,
         agent.allowedTools ? JSON.stringify(agent.allowedTools) : null,
@@ -696,7 +931,7 @@ export class Store {
       .prepare(
         `UPDATE agents SET name=?, emoji=?, description=?, model=?, engine=?, permission_mode=?,
           approval_policy=?, system_prompt=?, cli_agent=?, parent_agent_id=?, plugin_ids=?,
-          mcp_server_ids=?, rag_collection_ids=?,
+          mcp_server_ids=?, rag_collection_ids=?, resilience_policy_id=?,
           workspace_dir=?, memory_enabled=?, allowed_tools=?,
           disallowed_tools=?, max_turns=?, timeout_sec=?, token_budget=?, color=?, pinned=?,
           archived=?, updated_at=? WHERE id=?`,
@@ -715,6 +950,7 @@ export class Store {
         JSON.stringify(agent.pluginIds ?? []),
         JSON.stringify(agent.mcpServerIds ?? []),
         JSON.stringify(agent.ragCollectionIds ?? []),
+        agent.resiliencePolicyId ?? null,
         agent.workspaceDir,
         agent.memoryEnabled ? 1 : 0,
         agent.allowedTools ? JSON.stringify(agent.allowedTools) : null,
@@ -742,10 +978,11 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO runs (id, agent_id, origin, origin_id, parent_run_id, prompt, skill_id,
-          status, session_id, model, engine, tmux_session, num_turns, input_tokens, output_tokens,
+          status, session_id, model, engine, tmux_session, provider_kind, account_id, account_name,
+          attempt_count, num_turns, input_tokens, output_tokens,
           cache_read_tokens, cache_write_tokens, cost_usd, result_text, error, created_at,
           started_at, ended_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         run.id,
@@ -760,6 +997,10 @@ export class Store {
         run.model,
         run.engine,
         run.tmuxSession,
+        run.providerKind,
+        run.accountId,
+        run.accountName,
+        run.attemptCount,
         run.numTurns,
         run.inputTokens,
         run.outputTokens,
@@ -777,7 +1018,8 @@ export class Store {
   updateRun(run: Run): void {
     this.db
       .prepare(
-        `UPDATE runs SET status=?, session_id=?, tmux_session=?, num_turns=?, input_tokens=?,
+        `UPDATE runs SET status=?, session_id=?, tmux_session=?, provider_kind=?, account_id=?,
+          account_name=?, attempt_count=?, num_turns=?, input_tokens=?,
           output_tokens=?, cache_read_tokens=?, cache_write_tokens=?, cost_usd=?, result_text=?,
           error=?, started_at=?, ended_at=? WHERE id=?`,
       )
@@ -785,6 +1027,10 @@ export class Store {
         run.status,
         run.sessionId,
         run.tmuxSession,
+        run.providerKind,
+        run.accountId,
+        run.accountName,
+        run.attemptCount,
         run.numTurns,
         run.inputTokens,
         run.outputTokens,
@@ -1329,6 +1575,327 @@ export class Store {
       stmt.run(key, JSON.stringify(value));
     }
     return this.getSettings();
+  }
+
+  getOnboarding(): OnboardingState {
+    const row = this.db.prepare('SELECT value FROM settings WHERE key = ?').get(ONBOARDING_KEY) as
+      SqlRow | undefined;
+    if (!row) return { ...DEFAULT_ONBOARDING };
+    return {
+      ...DEFAULT_ONBOARDING,
+      ...safeJsonParse<Partial<OnboardingState>>(str(row.value), {}),
+    };
+  }
+
+  patchOnboarding(patch: Partial<OnboardingState>): OnboardingState {
+    const next = { ...this.getOnboarding(), ...patch };
+    this.db
+      .prepare(
+        'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+      )
+      .run(ONBOARDING_KEY, JSON.stringify(next));
+    return next;
+  }
+
+  // -- Comptes de fournisseurs -----------------------------------------------
+
+  listProviderAccounts(): ProviderAccount[] {
+    return (
+      this.db.prepare('SELECT * FROM provider_accounts ORDER BY priority, name').all() as SqlRow[]
+    ).map(rowToProviderAccount);
+  }
+
+  getProviderAccount(id: string): ProviderAccount | null {
+    const row = this.db.prepare('SELECT * FROM provider_accounts WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? rowToProviderAccount(row) : null;
+  }
+
+  insertProviderAccount(account: ProviderAccount): void {
+    this.db
+      .prepare(
+        `INSERT INTO provider_accounts (id, name, kind, enabled, auth_mode, config_dir, api_key_env,
+          base_url, api_flavor, model, command, args, env, priority, daily_cost_limit_usd, health,
+          cooldown_until, last_error, last_checked_at, detail, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        account.id,
+        account.name,
+        account.kind,
+        account.enabled ? 1 : 0,
+        account.authMode,
+        account.configDir,
+        account.apiKeyEnv,
+        account.baseUrl,
+        account.apiFlavor,
+        account.model,
+        account.command,
+        account.args ? JSON.stringify(account.args) : null,
+        JSON.stringify(account.env ?? {}),
+        account.priority,
+        account.dailyCostLimitUsd,
+        account.health,
+        account.cooldownUntil,
+        account.lastError,
+        account.lastCheckedAt,
+        account.detail,
+        account.createdAt,
+        account.updatedAt,
+      );
+  }
+
+  updateProviderAccount(account: ProviderAccount): void {
+    this.db
+      .prepare(
+        `UPDATE provider_accounts SET name=?, kind=?, enabled=?, auth_mode=?, config_dir=?,
+          api_key_env=?, base_url=?, api_flavor=?, model=?, command=?, args=?, env=?, priority=?,
+          daily_cost_limit_usd=?, health=?, cooldown_until=?, last_error=?, last_checked_at=?,
+          detail=?, updated_at=? WHERE id=?`,
+      )
+      .run(
+        account.name,
+        account.kind,
+        account.enabled ? 1 : 0,
+        account.authMode,
+        account.configDir,
+        account.apiKeyEnv,
+        account.baseUrl,
+        account.apiFlavor,
+        account.model,
+        account.command,
+        account.args ? JSON.stringify(account.args) : null,
+        JSON.stringify(account.env ?? {}),
+        account.priority,
+        account.dailyCostLimitUsd,
+        account.health,
+        account.cooldownUntil,
+        account.lastError,
+        account.lastCheckedAt,
+        account.detail,
+        nowIso(),
+        account.id,
+      );
+  }
+
+  deleteProviderAccount(id: string): void {
+    this.db.prepare('DELETE FROM provider_accounts WHERE id = ?').run(id);
+  }
+
+  /**
+   * Dépense du jour pour un compte, calculée depuis les tentatives.
+   *
+   * Depuis `run_attempts` et non `runs` : un run qui a basculé de compte a
+   * dépensé sur plusieurs, et imputer la totalité au dernier fausserait le
+   * plafond quotidien de celui-ci comme celui des autres.
+   */
+  accountCostToday(accountId: string, dayIsoPrefix: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(cost_usd), 0) AS total FROM run_attempts
+         WHERE account_id = ? AND started_at LIKE ?`,
+      )
+      .get(accountId, `${dayIsoPrefix}%`) as SqlRow | undefined;
+    return row ? num(row.total) : 0;
+  }
+
+  // -- Politiques de résilience ----------------------------------------------
+
+  listResiliencePolicies(): ResiliencePolicy[] {
+    return (
+      this.db.prepare('SELECT * FROM resilience_policies ORDER BY name').all() as SqlRow[]
+    ).map(rowToPolicy);
+  }
+
+  getResiliencePolicy(id: string): ResiliencePolicy | null {
+    const row = this.db.prepare('SELECT * FROM resilience_policies WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? rowToPolicy(row) : null;
+  }
+
+  insertResiliencePolicy(policy: ResiliencePolicy): void {
+    this.db
+      .prepare(
+        `INSERT INTO resilience_policies (id, name, description, targets, max_attempts_per_target,
+          max_total_attempts, backoff_initial_ms, backoff_factor, backoff_max_ms, backoff_jitter,
+          quota_wait_max_sec, switch_on_error, handoff_threshold_pct, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        policy.id,
+        policy.name,
+        policy.description,
+        JSON.stringify(policy.targets ?? []),
+        policy.maxAttemptsPerTarget,
+        policy.maxTotalAttempts,
+        policy.backoffInitialMs,
+        policy.backoffFactor,
+        policy.backoffMaxMs,
+        policy.backoffJitter ? 1 : 0,
+        policy.quotaWaitMaxSec,
+        policy.switchOnError ? 1 : 0,
+        policy.handoffThresholdPct,
+        policy.createdAt,
+        policy.updatedAt,
+      );
+  }
+
+  updateResiliencePolicy(policy: ResiliencePolicy): void {
+    this.db
+      .prepare(
+        `UPDATE resilience_policies SET name=?, description=?, targets=?, max_attempts_per_target=?,
+          max_total_attempts=?, backoff_initial_ms=?, backoff_factor=?, backoff_max_ms=?,
+          backoff_jitter=?, quota_wait_max_sec=?, switch_on_error=?, handoff_threshold_pct=?,
+          updated_at=? WHERE id=?`,
+      )
+      .run(
+        policy.name,
+        policy.description,
+        JSON.stringify(policy.targets ?? []),
+        policy.maxAttemptsPerTarget,
+        policy.maxTotalAttempts,
+        policy.backoffInitialMs,
+        policy.backoffFactor,
+        policy.backoffMaxMs,
+        policy.backoffJitter ? 1 : 0,
+        policy.quotaWaitMaxSec,
+        policy.switchOnError ? 1 : 0,
+        policy.handoffThresholdPct,
+        nowIso(),
+        policy.id,
+      );
+  }
+
+  deleteResiliencePolicy(id: string): void {
+    this.db.prepare('DELETE FROM resilience_policies WHERE id = ?').run(id);
+  }
+
+  /**
+   * Retire un compte supprimé de toutes les politiques qui le citaient.
+   *
+   * Sans ce nettoyage, une politique garderait une cible fantôme : le routeur
+   * la sauterait silencieusement, et l'opérateur croirait disposer d'un repli
+   * qui n'existe plus.
+   */
+  detachAccountFromPolicies(accountId: string): number {
+    let touched = 0;
+    for (const policy of this.listResiliencePolicies()) {
+      if (!policy.targets.some((t) => t.accountId === accountId)) continue;
+      this.updateResiliencePolicy({
+        ...policy,
+        targets: policy.targets.filter((t) => t.accountId !== accountId),
+      });
+      touched++;
+    }
+    return touched;
+  }
+
+  // -- Tentatives ------------------------------------------------------------
+
+  insertRunAttempt(attempt: Omit<RunAttempt, 'id'>): RunAttempt {
+    const result = this.db
+      .prepare(
+        `INSERT INTO run_attempts (run_id, idx, account_id, account_name, provider_kind, model,
+          status, failure_class, error, waited_ms, input_tokens, output_tokens, cache_read_tokens,
+          cache_write_tokens, cost_usd, started_at, ended_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        attempt.runId,
+        attempt.index,
+        attempt.accountId,
+        attempt.accountName,
+        attempt.providerKind,
+        attempt.model,
+        attempt.status,
+        attempt.failureClass,
+        attempt.error,
+        attempt.waitedMs,
+        attempt.inputTokens,
+        attempt.outputTokens,
+        attempt.cacheReadTokens,
+        attempt.cacheWriteTokens,
+        attempt.costUsd,
+        attempt.startedAt,
+        attempt.endedAt,
+      );
+    return { ...attempt, id: Number(result.lastInsertRowid) };
+  }
+
+  updateRunAttempt(attempt: RunAttempt): void {
+    this.db
+      .prepare(
+        `UPDATE run_attempts SET status=?, failure_class=?, error=?, input_tokens=?, output_tokens=?,
+          cache_read_tokens=?, cache_write_tokens=?, cost_usd=?, ended_at=? WHERE id=?`,
+      )
+      .run(
+        attempt.status,
+        attempt.failureClass,
+        attempt.error,
+        attempt.inputTokens,
+        attempt.outputTokens,
+        attempt.cacheReadTokens,
+        attempt.cacheWriteTokens,
+        attempt.costUsd,
+        attempt.endedAt,
+        attempt.id,
+      );
+  }
+
+  listRunAttempts(runId: string): RunAttempt[] {
+    return (
+      this.db
+        .prepare('SELECT * FROM run_attempts WHERE run_id = ? ORDER BY idx')
+        .all(runId) as SqlRow[]
+    ).map(rowToAttempt);
+  }
+
+  // -- Handoffs --------------------------------------------------------------
+
+  insertHandoff(handoff: SessionHandoff): void {
+    this.db
+      .prepare(
+        `INSERT INTO session_handoffs (id, run_id, agent_id, reason, summary, degraded, source_kind,
+          source_account_id, source_session_id, tokens_at_capture, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        handoff.id,
+        handoff.runId,
+        handoff.agentId,
+        handoff.reason,
+        handoff.summary,
+        handoff.degraded ? 1 : 0,
+        handoff.sourceKind,
+        handoff.sourceAccountId,
+        handoff.sourceSessionId,
+        handoff.tokensAtCapture,
+        handoff.createdAt,
+      );
+  }
+
+  /** Dernier résumé capturé pour un run — celui qui sert à la reprise. */
+  latestHandoffForRun(runId: string): SessionHandoff | null {
+    const row = this.db
+      .prepare('SELECT * FROM session_handoffs WHERE run_id = ? ORDER BY created_at DESC LIMIT 1')
+      .get(runId) as SqlRow | undefined;
+    return row ? rowToHandoff(row) : null;
+  }
+
+  listHandoffs(agentId?: string, limit = 50): SessionHandoff[] {
+    const sql = agentId
+      ? 'SELECT * FROM session_handoffs WHERE agent_id = ? ORDER BY created_at DESC LIMIT ?'
+      : 'SELECT * FROM session_handoffs ORDER BY created_at DESC LIMIT ?';
+    const rows = (
+      agentId ? this.db.prepare(sql).all(agentId, limit) : this.db.prepare(sql).all(limit)
+    ) as SqlRow[];
+    return rows.map(rowToHandoff);
+  }
+
+  getHandoff(id: string): SessionHandoff | null {
+    const row = this.db.prepare('SELECT * FROM session_handoffs WHERE id = ?').get(id) as
+      SqlRow | undefined;
+    return row ? rowToHandoff(row) : null;
   }
 
   // -- Métriques / agrégats --------------------------------------------------------------

@@ -2,6 +2,7 @@
  * Modèle de domaine Maestro — partagé entre le serveur et le front.
  * Convention : toutes les dates sont des chaînes ISO 8601 UTC.
  */
+import type { ProviderKind } from './providers.ts';
 
 // ---------------------------------------------------------------------------
 // Agents
@@ -20,6 +21,15 @@ export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermiss
  */
 export type ApprovalPolicy = 'auto' | 'ask' | 'guarded';
 
+/**
+ * Moteur de session d'un agent.
+ *
+ * `sdk` ne désigne plus « Claude Code » mais « une session non interactive
+ * pilotée par Maestro » : le fournisseur effectif (Claude Code, Codex,
+ * OpenCode, API HTTP) et le compte utilisé viennent de la politique de
+ * résilience de l'agent. `tmux` reste hors de ce mécanisme — une session
+ * interactive attachable ne se rejoue pas sur un autre outil.
+ */
 export type AgentEngine = 'sdk' | 'tmux';
 
 export interface AgentConfig {
@@ -51,6 +61,13 @@ export interface AgentConfig {
   mcpServerIds: string[];
   /** Collections RAG interrogeables par cet agent via l'outil rag_search. */
   ragCollectionIds: string[];
+  /**
+   * Politique de résilience appliquée aux runs de cet agent : ordre des comptes
+   * et fournisseurs, retries, attente de quota, seuil de handoff. `null` =
+   * politique par défaut de l'instance ; aucune des deux = environnement
+   * ambiant, comme avant l'introduction des comptes.
+   */
+  resiliencePolicyId: string | null;
   /**
    * Agent dont celui-ci est un subagent. Reflète la topologie réelle de
    * délégation : Maestro → lead → experts. `null` = agent de premier niveau,
@@ -120,6 +137,17 @@ export interface Run {
   engine: AgentEngine;
   /** Nom de la session tmux quand engine = 'tmux'. */
   tmuxSession: string | null;
+  /**
+   * Fournisseur de la dernière tentative. Renseigné même en cas d'échec : sans
+   * lui, un run rouge ne dirait pas *qui* a échoué.
+   */
+  providerKind: ProviderKind;
+  /** Compte utilisé par la dernière tentative ; null = environnement ambiant. */
+  accountId: string | null;
+  /** Nom du compte, dénormalisé pour survivre à sa suppression. */
+  accountName: string | null;
+  /** Nombre de tentatives consommées, bascules comprises. 1 = aucun repli. */
+  attemptCount: number;
   numTurns: number;
   inputTokens: number;
   outputTokens: number;
@@ -450,6 +478,13 @@ export interface PipelineStep {
    * {{prev}} (sortie de l'étape précédente), {{steps.<name>}} (sortie d'une étape nommée).
    */
   promptTemplate: string;
+  /**
+   * Politique de résilience propre à cette étape, qui l'emporte sur celle de
+   * l'agent. C'est ce qui permet un workflow hétérogène : rédiger sur un
+   * compte d'abonnement, relire sur un autre outil, synthétiser sur une API
+   * bon marché — sans dupliquer les agents.
+   */
+  resiliencePolicyId: string | null;
 }
 
 export interface Pipeline {
@@ -624,6 +659,11 @@ export interface Settings {
   maxConcurrentRuns: number;
   /** Profondeur max de délégation agent→agent (anti-boucle). */
   maxAgentDepth: number;
+  /**
+   * Politique de résilience appliquée aux agents qui n'en déclarent pas.
+   * `null` = environnement ambiant du serveur, sans repli.
+   */
+  defaultResiliencePolicyId: string | null;
 }
 
 export interface ServerInfo {

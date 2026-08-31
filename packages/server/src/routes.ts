@@ -23,6 +23,9 @@ import { McpError, type McpRegistry } from './mcp-registry.ts';
 import { PluginError, type PluginService } from './plugins.ts';
 import { embeddingStatus } from './rag-embeddings.ts';
 import { RagError, type RagService } from './rag.ts';
+import type { HandoffService } from './providers/handoff.ts';
+import type { ProviderService } from './providers/registry.ts';
+import { registerProviderRoutes } from './routes-providers.ts';
 import type { SessionRadar } from './radar.ts';
 import type { SkillRegistry } from './skills.ts';
 import type { TmuxBridge } from './tmux.ts';
@@ -52,6 +55,8 @@ export interface Services {
   rag: RagService;
   radar: SessionRadar;
   tmux: TmuxBridge;
+  providers: ProviderService;
+  handoffs: HandoffService;
   telegramEnabled: boolean;
   startedAt: string;
 }
@@ -174,6 +179,7 @@ const agentBaseSchema = z.object({
   pluginIds: z.array(z.string().max(40)).default([]),
   mcpServerIds: z.array(z.string().max(40)).default([]),
   ragCollectionIds: z.array(z.string().max(40)).default([]),
+  resiliencePolicyId: z.string().max(60).nullable().default(null),
   workspaceDir: z.string().max(500).nullable().optional(),
   memoryEnabled: z.boolean().default(true),
   allowedTools: z.array(z.string()).nullable().default(null),
@@ -238,6 +244,9 @@ const pipelineSchema = z.object({
         agentId: z.string(),
         skillId: z.string().nullable().default(null),
         promptTemplate: z.string().min(1).max(50000),
+        /* Route cette étape vers d'autres fournisseurs que ceux de l'agent :
+           c'est ce qui rend un workflow hétérogène sans dupliquer les agents. */
+        resiliencePolicyId: z.string().max(60).nullable().default(null),
       }),
     )
     .min(1),
@@ -285,6 +294,7 @@ const settingsSchema = z.object({
   approvalTimeoutSec: z.number().int().min(30).max(86400).optional(),
   maxConcurrentRuns: z.number().int().min(1).max(32).optional(),
   maxAgentDepth: z.number().int().min(0).max(5).optional(),
+  defaultResiliencePolicyId: z.string().max(60).nullable().optional(),
 });
 
 /**
@@ -754,6 +764,9 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
         pluginIds: [],
         mcpServerIds: [],
         ragCollectionIds: [],
+        /* Un agent importé hérite de la politique par défaut de l'instance : lui
+           en imposer une ici ferait un choix que l'opérateur n'a pas fait. */
+        resiliencePolicyId: null,
         parentAgentId: body.parentAgentId ?? null,
         memoryEnabled: true,
         allowedTools: declaredTools.length > 0 ? declaredTools : null,
@@ -1179,5 +1192,11 @@ export function registerRoutes(app: FastifyInstance, s: Services): void {
   app.patch('/api/settings', async (req) => {
     const patch = parseOr400(settingsSchema, req.body);
     return s.store.patchSettings(patch);
+  });
+
+  registerProviderRoutes(app, {
+    store: s.store,
+    providers: s.providers,
+    handoffs: s.handoffs,
   });
 }

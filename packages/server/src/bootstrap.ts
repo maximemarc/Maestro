@@ -23,6 +23,8 @@ import { PipelineService } from './pipelines.ts';
 import { registerMcpGateway } from './mcp-http.ts';
 import { McpRegistry } from './mcp-registry.ts';
 import { PluginService } from './plugins.ts';
+import { HandoffService } from './providers/handoff.ts';
+import { ProviderService } from './providers/registry.ts';
 import { RagService } from './rag.ts';
 import { SessionRadar } from './radar.ts';
 import { registerRoutes } from './routes.ts';
@@ -62,6 +64,8 @@ const tmux = new TmuxBridge();
 const pluginService = new PluginService(config, store, bus);
 const mcpRegistry = new McpRegistry(store, bus);
 const ragService = new RagService(store, bus, agents);
+const providers = new ProviderService(store, bus, config);
+const handoffs = new HandoffService(store, bus, providers);
 const engine = new RunEngine(
   store,
   bus,
@@ -74,6 +78,8 @@ const engine = new RunEngine(
   pluginService,
   mcpRegistry,
   ragService,
+  providers,
+  handoffs,
 );
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
@@ -201,6 +207,8 @@ registerRoutes(app, {
   rag: ragService,
   radar,
   tmux,
+  providers,
+  handoffs,
   telegramEnabled: telegram.enabled,
   startedAt,
 });

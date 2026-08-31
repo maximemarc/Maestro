@@ -24,6 +24,7 @@ import type {
   SkillDef,
   TmuxSessionInfo,
 } from './types.ts';
+import type { ProviderAccount, ResiliencePolicy, RunAttempt, SessionHandoff } from './providers.ts';
 
 // ---------------------------------------------------------------------------
 // WebSocket : événements serveur → client
@@ -54,6 +55,15 @@ export type ServerEvent =
   | { type: 'rag.updated'; payload: RagCollection }
   | { type: 'rag.deleted'; payload: { id: string } }
   | { type: 'metrics.tick'; payload: MetricsSnapshot }
+  | { type: 'provider.updated'; payload: ProviderAccount }
+  | { type: 'provider.deleted'; payload: { id: string } }
+  | { type: 'policy.updated'; payload: ResiliencePolicy }
+  | { type: 'policy.deleted'; payload: { id: string } }
+  /* La tentative est poussée séparément du run : c'est le seul moyen de voir
+     une bascule *pendant* qu'elle se produit, et non après coup dans un
+     historique. */
+  | { type: 'run.attempt'; payload: RunAttempt }
+  | { type: 'handoff.created'; payload: SessionHandoff }
   | { type: 'log'; payload: LogLine };
 
 export type ServerEventType = ServerEvent['type'];
