@@ -12,7 +12,10 @@
  * interactifs proposés par défaut pour Codex et OpenCode soient les bons. Cela
  * ne se vérifie qu'avec les binaires en face.
  */
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type {
   AgentConfig,
   ProviderAccount,
@@ -22,6 +25,7 @@ import type {
 } from '@maestro/shared';
 import { renderArgs, type AttemptContext } from './adapter.ts';
 import { CliAdapter } from './cli.ts';
+import { forgetInvocation } from './cli-invocation.ts';
 
 function shellAccount(script: string): ProviderAccount {
   return {
@@ -163,6 +167,84 @@ describe('exécution', () => {
     const init = captured.find((e) => e.kind === 'init');
     expect(init?.payload.text).toContain('permissions non interceptées');
   });
+});
+
+describe('invocation automatique', () => {
+  /*
+   * Un compte sans arguments ne doit pas exiger de configuration : Maestro lit
+   * l'aide du binaire et en déduit la ligne de commande. Le faux outil
+   * ci-dessous déclare une sous-commande `exec` et l'option `--json`, et
+   * imprime ce qu'il a reçu — de quoi vérifier que l'invocation construite est
+   * bien celle qui part.
+   */
+  const dir = mkdtempSync(join(tmpdir(), 'maestro-cliexec-'));
+  const binary = join(dir, 'faux-outil');
+
+  beforeAll(() => {
+    writeFileSync(
+      binary,
+      `#!/bin/sh
+if [ "$1" = "--help" ]; then
+  echo "Usage: faux-outil [OPTIONS] <COMMAND>"
+  echo ""
+  echo "Commands:"
+  echo "  exec     Run non-interactively"
+  exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  echo "Usage: faux-outil exec [OPTIONS] [PROMPT]"
+  echo ""
+  echo "Options:"
+  echo "      --json           Emit JSONL"
+  exit 0
+fi
+echo "recu: $*"
+`,
+      { mode: 0o755 },
+    );
+    forgetInvocation();
+  });
+
+  afterAll(() => {
+    forgetInvocation();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('déduit la ligne de commande quand le compte n’en impose pas', async () => {
+    const captured: Captured[] = [];
+    const account = { ...shellAccount(''), command: binary, args: null };
+    const outcome = await new CliAdapter('codex-cli').execute(context(account, captured));
+    expect(outcome.status).toBe('succeeded');
+    // `--json` est déclaré par l'aide, `--model` ne l'est pas : il est omis.
+    expect(outcome.resultText).toContain('exec --json');
+    expect(outcome.resultText).not.toContain('--model');
+    expect(outcome.resultText).toContain('fais quelque chose');
+  });
+
+  it('respecte les arguments imposés par le compte, sans détection', async () => {
+    // Une valeur saisie par l'opérateur est un choix explicite ; la détection
+    // ne doit pas le contredire.
+    const captured: Captured[] = [];
+    const account = { ...shellAccount(''), command: binary, args: ['{{prompt}}'] };
+    const outcome = await new CliAdapter('codex-cli').execute(context(account, captured));
+    expect(outcome.resultText).toContain('recu: fais quelque chose');
+    expect(outcome.resultText).not.toContain('exec');
+  });
+});
+
+describe('délai maximal', () => {
+  it('interrompt un moteur qui ne rend jamais la main', async () => {
+    /* Le garde-fou de temps n'existait que dans le chemin SDK : un CLI bloqué
+       aurait immobilisé son agent indéfiniment, puisqu'un agent n'exécute qu'un
+       run à la fois. */
+    const captured: Captured[] = [];
+    const ctx = context(shellAccount('sleep 30'), captured);
+    ctx.timeoutSec = 1;
+    const outcome = await new CliAdapter('codex-cli').execute(ctx);
+    expect(outcome.status).toBe('failed');
+    expect(outcome.error).toContain('Délai maximal dépassé');
+    expect(outcome.failureSignal?.hint).toBe('budget');
+  }, 15_000);
 });
 
 describe('sonde', () => {

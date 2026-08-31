@@ -110,10 +110,21 @@ tombe, et d'exécuter ailleurs que chez Anthropic.
 > Le fournisseur `http-api`, lui, n'a aucun outil et ne modifie pas le
 > workspace — c'est un repli de rédaction, pas un moteur de codage.
 
-> ℹ️ Les commandes non interactives proposées par défaut pour Codex et OpenCode
-> sont des **propositions**, pas un contrat : leurs options changent d'une
-> version à l'autre. Elles sont éditables par compte, et le bouton « Tester »
-> les confronte à la version installée.
+> ℹ️ **L'invocation des moteurs CLI n'est pas codée en dur.** Les options non
+> interactives de Codex et d'OpenCode changent d'une version à l'autre : une
+> ligne de commande figée marcherait chez celui qui l'a écrite et échouerait
+> ailleurs. Maestro lit donc `<outil> --help` sur la machine et **n'émet que ce
+> que le binaire déclare** — sous-commande, `--json`, `--model` : chaque élément
+> n'est ajouté que s'il y figure. Une option disparue est ignorée, une option
+> renommée n'est pas inventée, et il n'y a rien à régler. L'invocation déduite
+> est affichée sur la page Fournisseurs ; le champ « Arguments » d'un compte ne
+> sert qu'à imposer sa propre ligne de commande.
+>
+> 🔒 Ce qui n'est **jamais** ajouté automatiquement : les options
+> d'auto-approbation (`--full-auto` et équivalentes). Elles sont repérées et
+> signalées, pas activées — sur un moteur où Maestro n'intercepte déjà plus les
+> outils, cumuler le second abandon serait une décision de sécurité prise par
+> une heuristique.
 
 ### Approbations (human-in-the-loop)
 

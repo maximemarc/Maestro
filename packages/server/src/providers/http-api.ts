@@ -57,6 +57,9 @@ export class HttpApiAdapter implements ProviderAdapter {
           ? null
           : `La variable ${envName} n’est pas définie dans l’environnement du serveur.`
         : 'Choisis la variable d’environnement qui porte la clé ; sa valeur ne sera ni stockée ni affichée.',
+      // Appel HTTP direct : il n'y a pas de ligne de commande à déduire.
+      invocation: null,
+      invocationDegraded: false,
     };
   }
 

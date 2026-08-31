@@ -275,8 +275,39 @@ classée `auth` en 4,5 s, résumé de reprise rédigé, tentative 2 réussie ave
 résultat attendu, compte fautif automatiquement marqué `unauthenticated` — donc
 écarté d'emblée aux runs suivants.
 
-**Non vérifié** : les invocations non interactives de Codex et d'OpenCode, dont
-les binaires sont absents de la machine de développement. L'adaptateur, lui, est
-testé de bout en bout en le branchant sur `sh` — commande, arguments, découpage
-de la sortie, code de retour, stderr et interruption sont le même code quel que
-soit le binaire au bout.
+**Invocation des moteurs CLI : déduite, pas codée en dur.** Le premier jet
+embarquait une suite d'arguments pour Codex et OpenCode, avec la mention « à
+vérifier contre la version installée ». C'était reporter le problème sur
+l'utilisateur : leurs options changent d'une version à l'autre, et celui qui
+tombe sur un écart doit deviner quoi corriger.
+
+`cli-invocation.ts` lit donc `<outil> --help` — puis l'aide de la sous-commande,
+plus précise — et **n'émet que ce que le binaire déclare**. Sous-commande,
+`--json`, `--model`, forme du prompt (positionnel ou par option) : chaque
+élément n'est ajouté que s'il figure dans l'aide. Une option disparue est
+ignorée, une option renommée n'est pas inventée. Le champ « Arguments » d'un
+compte ne sert plus qu'à **imposer** une ligne de commande, et vide signifie
+« détecte ».
+
+Deux points tranchés au passage :
+
+- **Aucun contournement d'approbation n'est ajouté automatiquement.**
+  `--full-auto` et ses équivalents sont repérés dans l'aide et signalés à
+  l'opérateur, jamais activés. Sur un moteur où Maestro n'intercepte déjà plus
+  les outils, ajouter le second abandon à sa place serait une décision de
+  sécurité prise par une heuristique.
+- **Le repli est minimal, et se déclare tel quel.** Si l'aide est illisible, on
+  lance la sous-commande candidate et le prompt, rien de plus, avec un drapeau
+  `degraded` visible dans la sonde et dans le transcript. Une suite d'options
+  inventées échouerait de façon plus obscure.
+
+La reconnaissance est testée sur les trois styles d'aide répandus (clap,
+commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
+part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
+pour une absence de réponse.
+
+**Reste non vérifié** : le comportement des vrais Codex et OpenCode, absents de
+cette machine. Ce qui est vérifié, en revanche, c'est que Maestro n'invente rien
+— il ne peut passer qu'une option lue dans l'aide du binaire présent. L'adaptateur
+lui-même est testé de bout en bout sur des binaires réels : commande, arguments,
+découpage de la sortie, code de retour, stderr, délai maximal et interruption.

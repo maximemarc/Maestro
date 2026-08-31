@@ -129,6 +129,8 @@ export async function probeClaude(dataDir: string): Promise<ProviderProbe> {
       envCandidates: envCandidates(),
       ready: false,
       hint: 'Le binaire « claude » est absent du PATH du serveur Maestro.',
+      invocation: null,
+      invocationDegraded: false,
     };
   }
 
@@ -167,6 +169,10 @@ export async function probeClaude(dataDir: string): Promise<ProviderProbe> {
       loggedIn > 0
         ? null
         : 'Aucun profil authentifié : lance `claude auth login`, ou déclare un compte sur clé d’API.',
+    /* Ce fournisseur ne passe pas par une ligne de commande construite par
+       Maestro : le SDK pilote la session lui-même. */
+    invocation: null,
+    invocationDegraded: false,
   };
 }
 

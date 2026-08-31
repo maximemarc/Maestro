@@ -36,6 +36,7 @@ import {
   type AttemptOutcome,
   type ProviderAdapter,
 } from './adapter.ts';
+import { detectInvocation, type CliInvocation } from './cli-invocation.ts';
 
 const exec = promisify(execFile);
 
@@ -69,10 +70,17 @@ export class CliAdapter implements ProviderAdapter {
         envCandidates: [],
         ready: false,
         hint: `« ${command} » est absent du PATH du serveur Maestro.`,
+        invocation: null,
+        invocationDegraded: false,
       };
     }
 
     const version = await readVersion(command);
+    /* La sonde force la relecture de l'aide : c'est le geste par lequel
+       l'opérateur demande un état à jour, typiquement après avoir mis l'outil à
+       jour. Servir un cache ici viderait le bouton de son sens. */
+    const invocation = await detectInvocation(this.kind, command, { refresh: true });
+
     return {
       kind: this.kind,
       label,
@@ -81,24 +89,44 @@ export class CliAdapter implements ProviderAdapter {
       detectedProfiles: [],
       envCandidates: [],
       ready: true,
-      hint: defaults
-        ? `${defaults.note} Vérifie la commande non interactive contre cette version avant de t’y fier.`
-        : null,
+      hint: buildHint(defaults?.note ?? null, invocation),
+      invocation: invocation.args,
+      invocationDegraded: invocation.degraded,
     };
   }
 
   async execute(ctx: AttemptContext): Promise<AttemptOutcome> {
     const defaults = CLI_DEFAULTS[this.kind];
     const command = ctx.account?.command ?? defaults?.command ?? this.kind;
-    const template = ctx.account?.args ?? defaults?.args ?? ['{{prompt}}'];
+
+    /*
+     * Gabarit d'arguments : celui du compte s'il est renseigné, sinon celui
+     * déduit de l'aide du binaire installé. L'ordre compte — une valeur saisie
+     * par l'opérateur est un choix explicite, la détection ne doit pas le
+     * contredire.
+     */
+    const detected = ctx.account?.args ? null : await detectInvocation(this.kind, command);
+    const template = ctx.account?.args ?? detected?.args ?? ['{{prompt}}'];
     const args = renderArgs(template, {
       prompt: ctx.prompt,
       model: ctx.model,
       cwd: ctx.workspaceDir,
     });
 
+    /* La ligne affichée est la vraie, modèle substitué, mais le prompt reste
+       masqué : il fait des milliers de caractères et se lit déjà plus haut. */
+    const shown = renderArgs(template, {
+      prompt: '{{prompt}}',
+      model: ctx.model,
+      cwd: ctx.workspaceDir,
+    });
     ctx.emit('init', {
-      text: `Moteur ${PROVIDER_LABELS[this.kind]} — ${command} (permissions non interceptées)`,
+      text:
+        `Moteur ${PROVIDER_LABELS[this.kind]} — ${command} ${describeArgs(shown)} ` +
+        `(permissions non interceptées)` +
+        (detected?.degraded
+          ? ' ⚠ aide de la commande illisible : invocation minimale, la session peut rester interactive.'
+          : ''),
     });
 
     return await new Promise<AttemptOutcome>((resolve) => {
@@ -106,6 +134,7 @@ export class CliAdapter implements ProviderAdapter {
       let stderr = '';
       let pending = '';
       let settled = false;
+      let timedOut = false;
 
       /*
        * `detached` place le fils dans son propre groupe de processus.
@@ -125,6 +154,7 @@ export class CliAdapter implements ProviderAdapter {
       const finish = (outcome: AttemptOutcome): void => {
         if (settled) return;
         settled = true;
+        if (timeoutTimer) clearTimeout(timeoutTimer);
         ctx.abort.signal.removeEventListener('abort', onAbort);
         resolve(outcome);
       };
@@ -144,6 +174,23 @@ export class CliAdapter implements ProviderAdapter {
         setTimeout(() => killGroup('SIGKILL'), 3000).unref();
       }
       ctx.abort.signal.addEventListener('abort', onAbort, { once: true });
+
+      /*
+       * Délai maximal, appliqué ici et pas ailleurs.
+       *
+       * Le garde-fou de temps du moteur n'existait que dans le chemin SDK : un
+       * CLI resté bloqué — attente d'une confirmation que personne ne donnera,
+       * réseau suspendu — aurait immobilisé son agent sans fin, puisqu'un agent
+       * n'exécute qu'un run à la fois.
+       */
+      const timeoutMs = ctx.timeoutSec && ctx.timeoutSec > 0 ? ctx.timeoutSec * 1000 : 0;
+      const timeoutTimer = timeoutMs
+        ? setTimeout(() => {
+            timedOut = true;
+            killGroup('SIGTERM');
+            setTimeout(() => killGroup('SIGKILL'), 3000).unref();
+          }, timeoutMs)
+        : null;
 
       child.stdout.on('data', (chunk: Buffer) => {
         const text = chunk.toString('utf8');
@@ -191,6 +238,20 @@ export class CliAdapter implements ProviderAdapter {
         if (settled) return;
         if (pending.trim()) emitLine(ctx, pending);
         const text = extractText(stdout);
+        if (timedOut) {
+          /* Un délai dépassé est un garde-fou Maestro, pas un incident du
+             fournisseur : le rejouer ailleurs relancerait la même course
+             contre le même chronomètre. */
+          finish({
+            status: 'failed',
+            sessionId: null,
+            resultText: text || null,
+            error: `Délai maximal dépassé (${ctx.timeoutSec} s)`,
+            failureSignal: { hint: 'budget' },
+            usage: { ...ZERO_USAGE },
+          });
+          return;
+        }
         if (ctx.abort.signal.aborted) {
           finish({
             status: 'failed',
@@ -279,6 +340,43 @@ function pickString(obj: Record<string, unknown>, keys: string[]): string | null
 function extractText(stdout: string): string {
   const clean = stdout.trim();
   return clean.length > 20_000 ? `…${clean.slice(-20_000)}` : clean;
+}
+
+/**
+ * Message de la sonde.
+ *
+ * Il dit trois choses, dans cet ordre : ce que Maestro a déduit, ce qu'il n'a
+ * pas pu déduire, et ce que l'opérateur peut vouloir ajouter lui-même. Les
+ * options d'auto-approbation sont mentionnées mais jamais activées : les
+ * ajouter à la place de l'opérateur reviendrait à décider pour lui d'exécuter
+ * sans confirmation, sur un moteur où Maestro ne peut de toute façon plus
+ * intercepter les outils.
+ */
+function buildHint(note: string | null, invocation: CliInvocation): string | null {
+  const parts: string[] = [];
+  if (invocation.degraded) {
+    parts.push(
+      'L’aide de la commande n’a pas pu être lue : invocation minimale, la session risque de rester interactive. Renseigne les arguments à la main sur le compte.',
+    );
+  } else {
+    parts.push(note ?? 'Invocation déduite de l’aide de la commande installée.');
+    if (!invocation.subcommand) {
+      parts.push(
+        'Aucune sous-commande non interactive reconnue : le binaire sera appelé directement.',
+      );
+    }
+  }
+  if (invocation.approvalFlags.length > 0) {
+    parts.push(
+      `Options d’auto-approbation disponibles sur cet outil (${invocation.approvalFlags.join(', ')}) — non ajoutées : c’est à toi de décider, Maestro n’intercepte pas les outils de ce moteur.`,
+    );
+  }
+  return parts.join(' ') || null;
+}
+
+/** Rend un gabarit d'arguments lisible dans le transcript. */
+function describeArgs(template: readonly string[]): string {
+  return template.map((arg) => (arg === '{{prompt}}' ? '<prompt>' : arg)).join(' ');
 }
 
 export async function resolveBinary(command: string): Promise<string | null> {

@@ -97,18 +97,50 @@ export const PROVIDER_CAPABILITIES: Record<ProviderKind, ProviderCapabilities> =
  * l'assistant de configuration. Une commande fausse échoue immédiatement, avec
  * son stderr — plutôt que de laisser croire à un fournisseur disponible.
  */
-export const CLI_DEFAULTS: Partial<
-  Record<ProviderKind, { command: string; args: string[]; note: string }>
-> = {
+export interface CliDefaults {
+  /** Binaire cherché dans le PATH. */
+  command: string;
+  /**
+   * Sous-commandes non interactives candidates, par ordre de préférence.
+   *
+   * Candidates et non imposées : une sous-commande n'est retenue que si l'aide
+   * du binaire installé la déclare. Un nom qui a disparu d'une version à
+   * l'autre est donc simplement ignoré, au lieu de produire un échec.
+   */
+  subcommands: string[];
+  /**
+   * Options utiles **si le binaire les annonce**, dans l'ordre où elles doivent
+   * apparaître. Aucune n'est ajoutée à l'aveugle.
+   *
+   * Ce qui n'y figure pas est délibéré : aucun contournement d'approbation ni
+   * de bac à sable n'est ajouté automatiquement. Ce choix a des conséquences de
+   * sécurité et appartient à l'opérateur, pas à une détection.
+   */
+  optionalFlags: string[];
+  note: string;
+}
+
+/**
+ * Points de départ de la détection pour les moteurs CLI.
+ *
+ * Ce ne sont pas des invocations toutes faites : la ligne de commande réelle
+ * est **dérivée de l'aide du binaire installé** (voir `cli-invocation.ts`).
+ * Coder en dur une suite d'options reviendrait à parier sur une version
+ * précise, et à obliger chaque utilisateur à corriger la configuration à la
+ * main dès que son outil diffère.
+ */
+export const CLI_DEFAULTS: Partial<Record<ProviderKind, CliDefaults>> = {
   'codex-cli': {
     command: 'codex',
-    args: ['exec', '--json', '--skip-git-repo-check', '--model', '{{model}}', '{{prompt}}'],
-    note: 'Sortie attendue en JSON par ligne sur stdout.',
+    subcommands: ['exec'],
+    optionalFlags: ['--json', '--skip-git-repo-check'],
+    note: 'Invocation non interactive dérivée de « codex --help ».',
   },
   'opencode-cli': {
     command: 'opencode',
-    args: ['run', '--model', '{{model}}', '{{prompt}}'],
-    note: 'Sortie texte brut ; le transcript sera plus grossier qu’avec le SDK.',
+    subcommands: ['run'],
+    optionalFlags: ['--print-logs'],
+    note: 'Invocation non interactive dérivée de « opencode --help ».',
   },
 };
 
@@ -407,6 +439,19 @@ export interface ProviderProbe {
   ready: boolean;
   /** Ce qui manque, en une phrase actionnable. */
   hint: string | null;
+  /**
+   * Invocation non interactive déduite de l'aide du binaire installé, gabarit
+   * compris (`{{prompt}}`, `{{model}}`). `null` pour un fournisseur sans
+   * binaire. L'afficher permet de vérifier d'un coup d'œil ce que Maestro
+   * lancera réellement, sans avoir à le deviner.
+   */
+  invocation: string[] | null;
+  /**
+   * Vrai quand l'aide n'a pas pu être lue et que l'invocation retombe sur un
+   * appel minimal. Le run reste tentable, mais sans les options qui le
+   * rendraient non interactif — d'où le signalement.
+   */
+  invocationDegraded: boolean;
 }
 
 export type OnboardingStep = 'welcome' | 'providers' | 'accounts' | 'policy' | 'done';

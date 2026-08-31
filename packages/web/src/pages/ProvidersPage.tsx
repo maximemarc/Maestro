@@ -74,7 +74,9 @@ function blankAccount(kind: ProviderKind): ProviderAccountCreate {
     apiFlavor: kind === 'http-api' ? 'anthropic' : null,
     model: null,
     command: cli?.command ?? null,
-    args: cli?.args ? [...cli.args] : null,
+    /* Vide = déduit de l'aide du binaire installé au moment du run. Proposer
+       une suite d'arguments toute faite reviendrait à parier sur une version. */
+    args: null,
     env: {},
     priority: 100,
     dailyCostLimitUsd: null,
@@ -413,6 +415,19 @@ function ProbeCard({ probe, onAdd }: { probe: ProviderProbe; onAdd: () => void }
         </button>
       </div>
       {probe.hint && <p className="hint mt-2">{probe.hint}</p>}
+      {probe.invocation && (
+        <p className={`hint mt-2${probe.invocationDegraded ? ' warn' : ''}`}>
+          {probe.invocationDegraded ? <Warning /> : null} Invocation déduite :{' '}
+          <span className="mono">
+            {[
+              /* Le binaire est affiché avec ses arguments : c'est la commande
+                 réelle que l'opérateur pourrait rejouer dans un terminal. */
+              probe.binaryPath?.split('/').pop(),
+              ...probe.invocation.map((a) => (a === '{{prompt}}' ? '<prompt>' : a)),
+            ].join(' ')}
+          </span>
+        </p>
+      )}
       {loggedIn.length > 0 && (
         <p className="hint mt-2">
           {loggedIn.length} profil(s) authentifié(s) :{' '}
@@ -746,15 +761,23 @@ function AccountModal(props: {
             </Field>
             <Field
               label="Arguments (un par ligne)"
-              hint="Variables disponibles : {{prompt}}, {{model}}, {{cwd}}."
+              hint="Laisse vide : Maestro déduit l’invocation de l’aide du binaire installé, et n’ajoute que les options qu’il déclare. Ne remplis ce champ que pour imposer ta propre ligne de commande. Variables : {{prompt}}, {{model}}, {{cwd}}."
             >
               <textarea
                 className="input mono"
                 rows={5}
-                value={(draft.args ?? []).join('\n')}
-                onChange={(e) =>
-                  set({ args: e.target.value.split('\n').filter((line) => line !== '') })
+                placeholder={
+                  probe?.invocation
+                    ? `détecté : ${probe.invocation.join(' ')}`
+                    : 'détection automatique'
                 }
+                value={(draft.args ?? []).join('\n')}
+                onChange={(e) => {
+                  const lines = e.target.value.split('\n').filter((line) => line !== '');
+                  /* Champ vidé = retour à la détection automatique, pas un
+                     tableau vide qui lancerait la commande sans prompt. */
+                  set({ args: lines.length > 0 ? lines : null });
+                }}
               />
             </Field>
           </>

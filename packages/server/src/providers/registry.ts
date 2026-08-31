@@ -399,6 +399,8 @@ export class ProviderService {
         envCandidates: [],
         ready: false,
         hint: 'Fournisseur inconnu',
+        invocation: null,
+        invocationDegraded: false,
       };
     }
     return await adapter.probe(account ?? null);
@@ -521,7 +523,10 @@ export class ProviderService {
         name: PROVIDER_LABELS[kind],
         authMode: 'inherit',
         command: defaults?.command ?? null,
-        args: defaults?.args ? [...defaults.args] : null,
+        /* `null` = détection au lancement, à partir de l'aide du binaire
+           installé. Figer ici une suite d'arguments la gèlerait à la version du
+           jour, et obligerait l'utilisateur à la corriger à la main plus tard. */
+        args: null,
         priority: (priority += 10),
       });
     }
