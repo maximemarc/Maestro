@@ -402,6 +402,16 @@ export function ConfigTab({ agent }: { agent: AgentConfig }) {
 
           {form.sandboxEnabled && (
             <>
+              {/* Le prérequis système est la première cause d'un confinement qui
+                  ne confine rien : le dire ici, où l'on coche la case, et non
+                  seulement dans une documentation qu'on lit après coup. */}
+              <p className="text-warn text-xs">
+                ⚠️ Nécessite <code>bubblewrap</code> et <code>socat</code> sur la machine (
+                <code>sudo apt install bubblewrap socat</code>). Sans eux, et si le confinement
+                n’est pas exigé ci-dessous, l’agent tourne <strong>sans confinement</strong> avec un
+                simple avertissement au journal.
+              </p>
+
               <label className="checkbox-row">
                 <input
                   type="checkbox"

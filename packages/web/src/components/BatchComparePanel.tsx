@@ -135,10 +135,18 @@ export function BatchComparePanel(props: { batches: TrainingBatch[] }) {
                 <span className="stat-chip ctx">
                   Coût <b>{fmtCost(result.summary.costDelta)}</b>
                 </span>
-                <span className="stat-chip ctx">
+                <span
+                  className="stat-chip ctx"
+                  title="Entrée + sortie, hors tokens de cache : deux exécutions du même prompt peuvent afficher le même volume pour des coûts très différents."
+                >
                   Tokens <b>{fmtTokens(result.summary.tokenDelta)}</b>
                 </span>
               </div>
+              <p className="text-faint text-xs mt-2">
+                Le coût est la référence économique. Les tokens comptent l’entrée et la sortie, hors
+                cache : un même volume peut correspondre à des factures très différentes selon que
+                le cache a été écrit ou relu.
+              </p>
 
               <div className="table-wrap scroll-y mt-3">
                 <table className="table">

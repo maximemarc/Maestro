@@ -370,6 +370,43 @@ en doublant sa facture n'est pas une amélioration.
   dernière place du plafond de concurrence. La priorité se déduit de l'origine,
   parce que c'est elle qui dit si quelqu'un attend devant son écran
 
+### Confinement d'un agent
+
+Optionnel et par agent : `sandbox: null` par défaut, et ne rien régler laisse
+Maestro se comporter exactement comme avant. C'est une décision prise pour un
+agent dont on n'est pas sûr, pas un péage que tous les autres paient.
+
+Le bac à sable est celui de Claude Code — isolation du système de fichiers par
+chemin, egress réseau filtré, seccomp — appliqué aux commandes que l'agent
+lance. Plus fin qu'un conteneur : la session continue de parler à l'API pendant
+que les commandes, elles, restent enfermées.
+
+> ⚠️ **Prérequis système : `bubblewrap` et `socat`.** Sans eux, le bac à sable ne
+> peut pas démarrer :
+>
+> ```
+> sudo apt install bubblewrap socat
+> ```
+>
+> Deux comportements, selon le réglage **« Exiger le confinement »** :
+>
+> - **décoché** (défaut) — l'agent tourne **sans confinement**, avec un
+>   avertissement au journal. Pratique, mais il faut le savoir : le réglage est
+>   actif dans l'interface alors que rien ne confine ;
+> - **coché** — le run **échoue** en nommant les dépendances manquantes. C'est le
+>   bon choix pour un agent précisément jugé risqué, où « dégradé en silence »
+>   est le pire des cas.
+
+🔒 Le jeton d'accès et la base de Maestro sont toujours illisibles depuis un
+agent confiné, quelle que soit la configuration : les lire suffirait à se faire
+lancer un run non confiné, et le confinement s'annulerait lui-même en une
+commande.
+
+Pour une frontière plus dure autour de l'instance entière, le `Dockerfile` et le
+`docker-compose.yml` fournis sont durcis (racine en lecture seule, capacités
+retirées, plafonds de processus, de mémoire et de CPU). Ils restent un chemin
+optionnel : `npm start` fonctionne sans.
+
 ### Accès et traçabilité
 
 - **Jetons nommés** : un par personne ou par script, révocables

@@ -1355,6 +1355,15 @@ export interface TrainingItem {
   score: number | null;
   scoreSource: 'grader' | 'human' | null;
   toolCallCount: number;
+  /**
+   * Entrée + sortie, **hors tokens de cache**.
+   *
+   * La distinction se voit sur un banc de non-régression : deux exécutions du
+   * même prompt affichent le même nombre de tokens pour des coûts très
+   * différents — la première paie l'écriture du cache, la seconde le relit. Le
+   * coût est donc la référence économique ; ce compteur mesure le volume produit,
+   * pas la facture.
+   */
   totalTokens: number;
   costUsd: number;
   error: string | null;
