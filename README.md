@@ -235,20 +235,37 @@ HTTP. Il se configure par variables d'environnement — `MAESTRO_URL`
 }
 ```
 
-**Ce que la passerelle expose** : `rag_collections`, `rag_search`, et les outils
-maison du registre, aplatis en `<serveur>__<outil>` (donc
-`mcp__maestro__crm__lister` vu du modèle).
+**Ce que la passerelle expose** : `rag_collections`, `rag_search`, les outils
+maison du registre aplatis en `<serveur>__<outil>` (donc
+`mcp__maestro__crm__lister` vu du modèle), et — dès qu'un agent est identifié —
+les **outils de contrôle** : `task_create`, `task_update`, `send_to_agent`,
+`memory_save`.
 
-**Ce qu'elle n'expose pas, et pourquoi** :
+**Session externe.** Une action de contrôle ouvre un run d'origine `external`,
+au nom de l'agent déclaré. Ce run n'exécute rien : le travail se fait chez le
+client tiers, dont Maestro n'a ni le transcript, ni les tokens, ni le coût. Il
+sert de journal — une ligne dans Mission Control, un parent pour les
+délégations, et une prise pour l'annulation. Il se referme après quinze minutes
+de silence, parce qu'un client tiers ne prévient pas qu'il s'arrête.
 
-- les outils de contrôle (`maestro_task_*`, `send_to_agent`, `memory_save`)
-  exigent un contexte de run — identité, comptabilisation, annulation. Les ouvrir
-  sans ça ferait agir un agent tiers dans l'angle mort de Mission Control ;
-- les serveurs MCP _externes_ du registre ne sont pas relayés : le client tiers
-  sait les déclarer lui-même, un proxy n'ajouterait qu'un saut réseau ;
-- un outil maison marqué **« approbation requise »** est annoncé mais **refusé** :
-  un client externe ne passe par aucun broker, l'exécuter contournerait en
-  silence une approbation que l'interface promet.
+L'annuler **annule en cascade les runs qu'elle a délégués** — c'est le geste
+utile. Elle ne coupe pas le client tiers, que Maestro ne pilote pas : un nouvel
+appel rouvrira une session. Le message d'annulation le dit.
+
+**Approbations.** Un outil maison marqué « approbation requise » passe par le
+même broker que pour un agent Maestro : même file, même historique, même
+résolution depuis le web ou Telegram. L'appel MCP attend la décision — plus lent
+qu'un refus, et seule façon de tenir la promesse de l'interface sans fermer la
+porte. Sans agent identifié, Maestro n'a personne à qui la demander et refuse.
+
+**Ce qu'elle n'expose pas** : les serveurs MCP _externes_ du registre ne sont pas
+relayés — le client tiers sait les déclarer lui-même, un proxy n'ajouterait qu'un
+saut réseau.
+
+> 🔒 Ce que la passerelle **ne peut pas** offrir, et qu'il ne faut pas laisser
+> croire : elle ne voit que les appels qui lui sont adressés. Un client tiers qui
+> lit et écrit des fichiers le fait avec ses propres outils, hors de portée de
+> Maestro. La gouvernance porte sur le canal Maestro, pas sur la machine.
 
 **Périmètre.** Sans en-tête, le client voit tout ce qui est activé — c'est le
 périmètre du jeton, qui ouvre déjà l'API complète. Avec

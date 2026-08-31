@@ -146,8 +146,8 @@ les découvrir après avoir ouvert `/mcp` sur le réseau — ce que fait le chan
 ## Ordre recommandé
 
 1. ~~**A1** — RAG + outils maison en MCP stdio et HTTP~~ — **livré**.
-2. **A2** — outils de contrôle (`task_*`, `send_to_agent`, `memory_save`) avec
-   identité d'agent, run externe et approbations côté serveur. **Prochain lot.**
+2. ~~**A2** — outils de contrôle (`task_*`, `send_to_agent`, `memory_save`) avec
+   identité d'agent, run externe et approbations côté serveur~~ — **livré**.
 3. ~~**Hygiène** — jeton hors query string, CORS restreint~~ — **livré**, avant
    l'ouverture de `/mcp` comme prévu.
 4. **B** — moteur `cli` + adaptateurs Codex/OpenCode, en affichant la perte de
@@ -204,10 +204,11 @@ maintenant la lecture recodée et compare sans casse ni diacritiques.
 
 ### Reste à faire
 
-- **A2** — outils de contrôle. Le point dur inchangé : run d'origine `external`
-  et broker d'approbation appelé depuis l'outil.
+- ~~**A2** — outils de contrôle, run d'origine `external`, broker d'approbation
+  appelé depuis l'outil~~ — **livré**, voir ci-dessous.
 - ~~**B** — moteur `cli` et adaptateurs~~ — **livré**, voir ci-dessous.
-- **Abstraction canal** — extraction d'une interface de `telegram.ts`.
+- **Abstraction canal** — extraction d'une interface de `telegram.ts`. Seul lot
+  de l'analyse initiale encore ouvert.
 
 ---
 
@@ -305,6 +306,58 @@ La reconnaissance est testée sur les trois styles d'aide répandus (clap,
 commander, cobra) et sur un vrai binaire écrit pour l'occasion — dont l'aide
 part sur stderr avec un code de retour 1, cas fréquent qu'un lecteur naïf prend
 pour une absence de réponse.
+
+## A2 — outils de contrôle pour les clients tiers, livré le 31/08/2026
+
+Le lot A1 exposait le RAG et les outils maison, et s'arrêtait là pour une raison
+précise : les outils de contrôle exigent un contexte de run qui n'existait pas
+hors run, et les outils sous approbation ne pouvaient pas être exécutés sans
+broker. Les deux verrous sont levés.
+
+**Session externe.** Un run d'origine `external` est ouvert au premier geste
+d'un client identifié, et refermé après quinze minutes de silence. Il n'exécute
+rien — le travail se fait chez le client tiers, dont Maestro n'a ni le
+transcript, ni les tokens, ni le coût. Il sert de **journal** : une ligne dans
+Mission Control, un parent pour les délégations, une prise pour l'annulation.
+
+Une session par agent, et non par appel : le transport Streamable HTTP est sans
+état, il n'y a pas d'identifiant de session à suivre, et un run par appel
+noierait la liste sous des dizaines de lignes d'une ligne.
+
+**Approbations réelles.** Un outil maison marqué `requiresApproval` n'est plus
+refusé : il passe par le même broker que pour un agent Maestro — même file, même
+historique, même résolution web ou Telegram. L'appel MCP attend la décision.
+Sans agent identifié, Maestro n'a personne à qui la demander et refuse.
+
+**Ce qui n'a pas été dupliqué.** La logique des actions vit désormais dans
+`mcp-actions.ts`, partagée par le serveur MCP in-process et la passerelle. La
+délégation porte les garde-fous anti-cascade — profondeur maximale, refus de
+l'auto-délégation, plafond de concurrence — et en tenir deux copies aurait
+garanti qu'une des deux dérive. Un client Codex échappant à la limite de
+profondeur pourrait déclencher une cascade que rien n'arrête.
+
+**Ce qu'annuler veut dire, dit franchement.** Annuler une session externe annule
+en cascade les runs qu'elle a délégués — c'est le geste utile, et il fonctionne.
+Elle ne coupe pas le client tiers, que Maestro ne pilote pas : un nouvel appel
+rouvre une session. Le message d'annulation le dit, plutôt que de laisser croire
+à un coupe-circuit.
+
+🔒 **Limite à ne pas masquer** : la passerelle ne voit que les appels qui lui
+sont adressés. Un client tiers qui lit et écrit des fichiers le fait avec ses
+propres outils, hors de portée de Maestro. La gouvernance porte sur le canal
+Maestro, pas sur la machine.
+
+**Corrigé au passage** : un run actif que le moteur ne pilote pas — une session
+externe — ne pouvait pas être annulé du tout. `cancel()` ne connaissait que ses
+runs actifs et sa file ; tout le reste restait « en cours » à vie, sans prise.
+
+**Vérification de bout en bout**, avec un vrai client MCP parlant en Streamable
+HTTP : sans en-tête d'agent, aucun outil de contrôle annoncé ; avec, les quatre
+outils apparaissent, `task_create` crée une carte attribuée à l'agent, la
+session externe apparaît dans les runs, l'action est journalisée dans son
+transcript (nom de l'outil et issue — jamais les arguments, qui peuvent
+contenir un prompt entier diffusé à tous les clients connectés), l'annulation
+depuis Maestro la referme, et l'appel suivant en rouvre une.
 
 ## Anticipation des quotas — livrée le 31/08/2026
 

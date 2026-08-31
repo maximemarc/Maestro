@@ -114,7 +114,17 @@ export interface AgentTemplate {
 // Runs (exécutions)
 // ---------------------------------------------------------------------------
 
-export type RunOrigin = 'manual' | 'routine' | 'kanban' | 'telegram' | 'pipeline' | 'agent';
+/**
+ * Ce qui a déclenché un run.
+ *
+ * `external` désigne une session menée par un **client MCP tiers** — Codex,
+ * OpenCode, Cursor — qui agit au nom d'un agent Maestro via la passerelle. Ce
+ * n'est pas Maestro qui exécute le travail, mais l'orchestrateur doit quand
+ * même le voir : sans ce run, un agent tiers modifierait le kanban, déléguerait
+ * et écrirait en mémoire dans l'angle mort de Mission Control.
+ */
+export type RunOrigin =
+  'manual' | 'routine' | 'kanban' | 'telegram' | 'pipeline' | 'agent' | 'external';
 
 export type RunStatus =
   'queued' | 'running' | 'waiting_approval' | 'succeeded' | 'failed' | 'cancelled' | 'timeout';

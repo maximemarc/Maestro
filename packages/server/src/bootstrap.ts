@@ -20,6 +20,7 @@ import { TaskService } from './kanban.ts';
 import { Metrics } from './metrics.ts';
 import { ApprovalBroker } from './permissions.ts';
 import { PipelineService } from './pipelines.ts';
+import { ExternalSessionService } from './mcp-external.ts';
 import { registerMcpGateway } from './mcp-http.ts';
 import { McpRegistry } from './mcp-registry.ts';
 import { PluginService } from './plugins.ts';
@@ -81,6 +82,7 @@ const engine = new RunEngine(
   providers,
   handoffs,
 );
+const externalSessions = new ExternalSessionService(store, bus);
 const scheduler = new Scheduler(store, bus, engine);
 const pipelines = new PipelineService(store, bus, engine);
 const telegram = new TelegramBot(config, store, bus, engine, agents, approvals);
@@ -90,6 +92,7 @@ const radar = new SessionRadar(config, store, bus, agents);
 skills.syncAllWorkspaces();
 scheduler.init();
 telegram.start();
+externalSessions.start();
 
 // ---------------------------------------------------------------------------
 // HTTP + WebSocket
@@ -224,6 +227,17 @@ registerMcpGateway(app, {
   bus,
   listServers: () => mcpRegistry.listRaw(),
   version: config.version,
+  /* Lot A2 : les clients tiers accèdent au kanban, à la délégation et à la
+     mémoire, sous une session visible et avec de vraies approbations. */
+  control: {
+    tasks,
+    agents,
+    bus,
+    engine,
+    maxAgentDepth: () => store.getSettings().maxAgentDepth,
+  },
+  sessions: externalSessions,
+  approvals,
 });
 
 // Front statique (build de production) avec repli SPA.

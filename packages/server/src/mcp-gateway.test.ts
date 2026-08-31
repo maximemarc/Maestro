@@ -5,12 +5,17 @@
  *
  * - le périmètre d'un agent est **fermé** : une collection ou un outil hors
  *   périmètre n'est ni listé, ni appelable en devinant son nom ;
- * - un outil sous approbation humaine n'est **pas** exécuté depuis un client
- *   externe, qui ne passe par aucun broker ;
- * - le catalogue n'annonce pas d'outil RAG quand aucune base n'est accessible.
+ * - un outil sous approbation humaine passe par le broker et **n'est exécuté
+ *   qu'après une décision** ; sans agent identifié, Maestro n'a personne à qui
+ *   la demander et refuse ;
+ * - une action de contrôle ouvre sa **session externe avant** d'agir : c'est
+ *   elle qui donne son parent à une délégation, et une délégation orpheline
+ *   échappe à l'annulation en cascade ;
+ * - le catalogue n'annonce pas d'outil RAG quand aucune base n'est accessible,
+ *   ni d'outil de contrôle quand aucun agent n'est identifié.
  */
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentConfig, McpServerDef, McpToolDef, RagCollection } from '@maestro/shared';
+import type { AgentConfig, McpServerDef, McpToolDef, RagCollection, Run } from '@maestro/shared';
 import type { AgentService } from './agents.ts';
 import type { Bus } from './bus.ts';
 import {
@@ -143,6 +148,62 @@ function harness(
   };
 
   return { deps, search, warnings };
+}
+
+/**
+ * Passerelle gouvernée : celle du lot A2, avec session externe, actions de
+ * contrôle et broker d'approbation.
+ *
+ * Les doublures enregistrent ce qui compte — le run passé au broker, le parent
+ * d'une délégation — parce que c'est précisément ce qui, mal branché, ferait
+ * agir un client tiers hors de portée de l'orchestrateur sans que rien ne le
+ * signale.
+ */
+function governedHarness(options: { approval?: 'allow' | 'deny'; servers?: McpServerDef[] } = {}) {
+  const base = harness({ servers: options.servers });
+  const sessionRun = { id: 'run_ext_1', agentId: 'agent-1' } as unknown as Run;
+
+  const touch = vi.fn(() => sessionRun);
+  const record = vi.fn();
+  /* Les doublures déclarent leurs paramètres : sans cela leur type d'appel est
+     un tuple vide, et l'inspection des arguments — le cœur de ces tests — ne
+     compile pas. */
+  const start = vi.fn((_input: Record<string, unknown>) => ({ id: 'run_child_1' }));
+  const created: { title: string; agentId: string }[] = [];
+  const requestHumanApproval = vi.fn(
+    async (_runId: string, _agent: AgentConfig, _tool: string, _args: unknown) => ({
+      decision: options.approval ?? 'allow',
+      resolvedBy: 'web',
+      note: options.approval === 'deny' ? 'Refusé en test' : undefined,
+    }),
+  );
+
+  const deps: GatewayDeps = {
+    ...base.deps,
+    control: {
+      tasks: {
+        create: (input: { title: string; agentId: string }) => {
+          created.push(input);
+          return { id: 'task-1', title: input.title, column: 'backlog' };
+        },
+        get: () => null,
+      },
+      agents: {
+        ...(base.deps.agents as unknown as object),
+        getByName: (name: string) =>
+          name === 'Relecteur' ? ({ id: 'agent-2', name: 'Relecteur' } as AgentConfig) : null,
+        list: () => [agent()],
+        appendMemory: vi.fn(),
+      },
+      bus: base.deps.bus,
+      engine: { start, waitForRun: vi.fn() },
+      maxAgentDepth: () => 2,
+    } as unknown as GatewayDeps['control'],
+    sessions: { touch, record } as unknown as GatewayDeps['sessions'],
+    approvals: { requestHumanApproval } as unknown as GatewayDeps['approvals'],
+  };
+
+  return { deps, touch, record, start, created, requestHumanApproval };
 }
 
 describe('périmètre', () => {
@@ -318,5 +379,124 @@ describe('résolution du nom d’agent', () => {
   it('accepte un nom écrit sans accent, comme dans une config à la main', () => {
     const { deps } = harness({ agents: [agent({ name: 'Sécurité' })] });
     expect(resolveScope(deps, 'securite').agent?.id).toBe('agent-1');
+  });
+});
+
+describe('outils de contrôle depuis un client tiers', () => {
+  it('ne les annonce pas sans agent identifié', () => {
+    /* Au nom de qui la carte serait-elle créée ? Les annoncer quand même ferait
+       échouer chaque appel après coup, la pire façon de dire non. */
+    const { deps } = governedHarness();
+    const names = listGatewayTools(resolveScope(deps, null), deps).map((t) => t.name);
+    expect(names).not.toContain('task_create');
+    expect(names).toContain('rag_search');
+  });
+
+  it('les annonce dès qu’un agent est identifié', () => {
+    const { deps } = governedHarness();
+    const names = listGatewayTools(resolveScope(deps, 'agent-1'), deps).map((t) => t.name);
+    expect(names).toEqual(
+      expect.arrayContaining(['task_create', 'task_update', 'send_to_agent', 'memory_save']),
+    );
+  });
+
+  it('ne les annonce pas sur une passerelle sans dépendances de contrôle', () => {
+    // Le pont stdio en construit une ainsi : elle doit rester fonctionnelle.
+    const { deps } = harness();
+    const names = listGatewayTools(resolveScope(deps, 'agent-1'), deps).map((t) => t.name);
+    expect(names).not.toContain('task_create');
+  });
+
+  it('refuse un appel de contrôle sans agent, en disant quoi faire', () => {
+    const { deps } = governedHarness();
+    return callGatewayTool(deps, resolveScope(deps, null), 'task_create', {
+      title: 'x',
+    }).then((result) => {
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain('x-maestro-agent');
+    });
+  });
+
+  it('ouvre une session externe avant d’agir', async () => {
+    /* Avant, jamais après : c'est la session qui donne son parent à une
+       délégation. L'ouvrir ensuite laisserait un run orphelin, non annulable en
+       cascade — le trou que ce lot comble. */
+    const { deps, touch, created } = governedHarness();
+    const result = await callGatewayTool(deps, resolveScope(deps, 'agent-1'), 'task_create', {
+      title: 'Relire la liasse',
+    });
+    expect(touch).toHaveBeenCalledOnce();
+    expect(created[0]?.agentId).toBe('agent-1');
+    expect(result.isError).toBeUndefined();
+  });
+
+  it('rattache une délégation à la session externe', async () => {
+    const { deps, start } = governedHarness();
+    await callGatewayTool(deps, resolveScope(deps, 'agent-1'), 'send_to_agent', {
+      agentName: 'Relecteur',
+      prompt: 'relis ceci',
+    });
+    const call = start.mock.calls[0]?.[0];
+    expect(call?.parentRunId).toBe('run_ext_1');
+    expect(call?.origin).toBe('agent');
+    expect(call?.depth).toBe(1);
+  });
+
+  it('applique les garde-fous de délégation, comme pour un agent interne', async () => {
+    // Un client tiers qui échapperait à la limite de profondeur pourrait
+    // déclencher une cascade que rien n'arrête.
+    const { deps } = governedHarness();
+    const result = await callGatewayTool(deps, resolveScope(deps, 'agent-1'), 'send_to_agent', {
+      agentName: 'Inconnu',
+      prompt: 'x',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain('introuvable');
+  });
+
+  it('journalise chaque action dans la session', async () => {
+    const { deps, record } = governedHarness();
+    await callGatewayTool(deps, resolveScope(deps, 'agent-1'), 'task_create', { title: 'x' });
+    expect(record).toHaveBeenCalledWith(expect.anything(), 'task_create', 'ok');
+  });
+});
+
+describe('approbation humaine depuis un client tiers', () => {
+  const withApproval = () => ({
+    servers: [customServer({ tools: [customTool({ requiresApproval: true })] })],
+  });
+
+  it('demande la décision au broker, puis exécute si elle est accordée', async () => {
+    const { deps, requestHumanApproval } = governedHarness({
+      approval: 'allow',
+      ...withApproval(),
+    });
+    const result = await callGatewayTool(deps, resolveScope(deps, 'agent-1'), 'crm__lister', {
+      siret: '123',
+    });
+    expect(requestHumanApproval).toHaveBeenCalledOnce();
+    // La demande porte le run de la session : sans lui, l'approbation
+    // n'apparaîtrait rattachée à rien dans l'historique.
+    expect(requestHumanApproval.mock.calls[0]?.[0]).toBe('run_ext_1');
+    // L'outil pointe sur un port fermé : l'exécution échoue, mais elle a bien eu lieu.
+    expect(result.content[0]?.text).not.toContain('approbation humaine');
+  }, 20000);
+
+  it('refuse l’appel quand l’opérateur refuse', async () => {
+    const { deps } = governedHarness({ approval: 'deny', ...withApproval() });
+    const result = await callGatewayTool(deps, resolveScope(deps, 'agent-1'), 'crm__lister', {
+      siret: '123',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain('Refusé en test');
+  });
+
+  it('refuse sans agent identifié, faute de pouvoir demander quoi que ce soit', async () => {
+    const { deps } = governedHarness(withApproval());
+    const result = await callGatewayTool(deps, resolveScope(deps, null), 'crm__lister', {
+      siret: '123',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain('approbation humaine');
   });
 });

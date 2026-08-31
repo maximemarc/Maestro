@@ -234,6 +234,24 @@ export class RunEngine {
       this.finalize(run, 'cancelled', { error: 'Annulé avant démarrage' });
       return true;
     }
+
+    /*
+     * Run actif que le moteur ne pilote pas : une session externe, menée par un
+     * client MCP tiers. Elle ne s'interrompt pas — Maestro ne tient pas ce
+     * client — mais l'annulation reste utile : la cascade ci-dessus a déjà
+     * arrêté les runs qu'elle avait délégués, et la clore retire la session de
+     * Mission Control. Sans ce cas, un tel run restait « en cours » à vie, sans
+     * aucune prise.
+     */
+    if (!run.endedAt) {
+      this.finalize(run, 'cancelled', {
+        error:
+          run.origin === 'external'
+            ? "Session externe close depuis Maestro. Le client tiers n'est pas interrompu : il rouvrira une session à son prochain appel."
+            : 'Annulé',
+      });
+      return true;
+    }
     return false;
   }
 
