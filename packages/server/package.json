@@ -23,7 +23,7 @@
     "@maestro/shared": "*",
     "croner": "^10.0.1",
     "fastify": "^5.12.1",
-    "zod": "^4.4.3"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
